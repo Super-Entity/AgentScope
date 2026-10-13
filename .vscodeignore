@@ -1,0 +1,17 @@
+.git/**
+.npm-cache/**
+.github/**
+.vscode/**
+src/**
+out/test/**
+**/*.map
+node_modules/@types/**
+node_modules/typescript/**
+node_modules/@vscode/**
+artifacts/**
+test/**
+tsconfig.json
+package-lock.json
+AGENTS.md
+CONTRIBUTING.md
+**/*.vsix

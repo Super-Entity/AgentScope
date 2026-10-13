@@ -1,0 +1,262 @@
+{
+  "name": "agentscope",
+  "displayName": "AgentScope",
+  "description": "Manage project visibility, agent instructions and Codex filesystem scopes from one workspace panel.",
+  "version": "0.7.3",
+  "icon": "media/icon.png",
+  "publisher": "SuperEntity",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "workspace",
+    "submodule",
+    "agents",
+    "codex",
+    "permissions"
+  ],
+  "main": "./out/extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "View scopes in Restricted Mode; configuration changes require a trusted workspace."
+    },
+    "virtualWorkspaces": false
+  },
+  "activationEvents": [
+    "onView:agentscope.projects"
+  ],
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "test": "npm run compile && node --test out/test/*.test.js",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package --allow-missing-repository --out artifacts/"
+  },
+  "dependencies": {
+    "@iarna/toml": "^2.2.5",
+    "jsonc-parser": "^3.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "^4.0.0",
+    "typescript": "^5.9.3"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agentscope",
+          "title": "AgentScope",
+          "icon": "media/scope.svg"
+        }
+      ]
+    },
+    "views": {
+      "agentscope": [
+        {
+          "id": "agentscope.projects",
+          "name": "Projects and scopes",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "agentscope.refresh",
+        "title": "Refresh",
+        "category": "AgentScope",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "agentscope.addFolder",
+        "title": "Add folder",
+        "category": "AgentScope",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "agentscope.selectWorkspace",
+        "title": "Select workspace folder",
+        "category": "AgentScope"
+      },
+      {
+        "command": "agentscope.sharedPaths",
+        "title": "Manage workspace resources",
+        "category": "AgentScope"
+      },
+      {
+        "command": "agentscope.removeProject",
+        "title": "Remove project entry",
+        "category": "AgentScope",
+        "icon": "$(remove)"
+      },
+      {
+        "command": "agentscope.configure",
+        "title": "Configure project scope",
+        "category": "AgentScope",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "agentscope.toggleVisibility",
+        "title": "Toggle folder visibility",
+        "category": "AgentScope",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "agentscope.toggleAccess",
+        "title": "Enable or disable agent access",
+        "category": "AgentScope",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "agentscope.apply",
+        "title": "Apply workspace scopes",
+        "category": "AgentScope",
+        "icon": "$(check)"
+      },
+      {
+        "command": "agentscope.preview",
+        "title": "Preview changes",
+        "category": "AgentScope",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "agentscope.restore",
+        "title": "Restore last applied configuration",
+        "category": "AgentScope",
+        "icon": "$(history)"
+      },
+      {
+        "command": "agentscope.recover",
+        "title": "Recover saved configuration",
+        "category": "AgentScope",
+        "icon": "$(history)"
+      },
+      {
+        "command": "agentscope.reconfigure",
+        "title": "Reconfigure access",
+        "category": "AgentScope",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "agentscope.openAgents",
+        "title": "Open AGENTS.md",
+        "category": "AgentScope"
+      },
+      {
+        "command": "agentscope.openAccess",
+        "title": "Open access policy",
+        "category": "AgentScope"
+      },
+      {
+        "command": "agentscope.openCodex",
+        "title": "Open Codex workspace configuration",
+        "category": "AgentScope"
+      },
+      {
+        "command": "agentscope.savePreset",
+        "title": "Save preset",
+        "category": "AgentScope",
+        "icon": "$(save)"
+      },
+      {
+        "command": "agentscope.activatePreset",
+        "title": "Activate preset",
+        "category": "AgentScope",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "agentscope.deletePreset",
+        "title": "Delete preset",
+        "category": "AgentScope",
+        "icon": "$(trash)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "agentscope.selectWorkspace",
+          "when": "view == agentscope.projects",
+          "group": "configuration@1"
+        },
+        {
+          "command": "agentscope.sharedPaths",
+          "when": "view == agentscope.projects",
+          "group": "configuration@2"
+        },
+        {
+          "command": "agentscope.restore",
+          "when": "view == agentscope.projects",
+          "group": "configuration@3"
+        },
+        {
+          "command": "agentscope.recover",
+          "when": "view == agentscope.projects",
+          "group": "configuration@4"
+        },
+        {
+          "command": "agentscope.reconfigure",
+          "when": "view == agentscope.projects",
+          "group": "configuration@5"
+        },
+        {
+          "command": "agentscope.openAgents",
+          "when": "view == agentscope.projects",
+          "group": "configuration@6"
+        },
+        {
+          "command": "agentscope.openAccess",
+          "when": "view == agentscope.projects",
+          "group": "configuration@7"
+        },
+        {
+          "command": "agentscope.openCodex",
+          "when": "view == agentscope.projects",
+          "group": "configuration@8"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "AgentScope",
+      "properties": {
+        "agentscope.generateCodexProfile": {
+          "type": "boolean",
+          "default": true,
+          "description": "Generate a Codex permission profile when applying changes. Requires a compatible Codex client."
+        },
+        "agentscope.profileName": {
+          "type": "string",
+          "default": "agentscope",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+          "description": "Name of the generated Codex permission profile."
+        },
+        "agentscope.excludeFromSearch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Apply folder visibility choices to VS Code search exclusions as well."
+        },
+        "agentscope.allowCommandNetwork": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow command network access in the generated Codex profile. Enabled access has no domain filtering by default."
+        }
+      }
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Super-Entity/AgentScope.git"
+  },
+  "homepage": "https://github.com/Super-Entity/AgentScope#readme",
+  "bugs": {
+    "url": "https://github.com/Super-Entity/AgentScope/issues"
+  }
+}
