@@ -1,4 +1,4 @@
-<p align="center"><img src="media/icon.png" alt="AgentScope" width="96" /></p>
+<p align="left"><img src="media/icon.png" alt="AgentScope" width="96" /></p>
 
 # AgentScope
 
