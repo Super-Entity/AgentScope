@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.4
+
+- Create the package output directory before building, so packaging works from a fresh clone on Windows, macOS and Linux.
+
 ## 0.7.3
 
 - Simplify the installation and usage guide.

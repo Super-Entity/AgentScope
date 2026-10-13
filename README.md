@@ -29,7 +29,7 @@ VS Code 1.95 or later is required. To update a VSIX installation, download a new
 You can also install from the folder containing the downloaded package with VS Code's CLI:
 
 ```sh
-code --install-extension agentscope-0.7.3.vsix
+code --install-extension agentscope-0.7.4.vsix
 ```
 
 ## Getting started

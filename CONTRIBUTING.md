@@ -20,6 +20,6 @@ Pull requests should explain the resulting behavior, relevant validation and any
 
 ## Releases
 
-Increase the version in `package.json` and `package-lock.json`, update the changelog, then build and test the package. Use a GitHub release tag matching the package version, such as `v0.7.3`, and attach `artifacts/agentscope-0.7.3.vsix`. Users install that file directly; they do not need a development environment.
+Increase the version in `package.json` and `package-lock.json`, update the changelog, then build and test the package. Use a GitHub release tag matching the package version, such as `v0.7.4`, and attach `artifacts/agentscope-0.7.4.vsix`. Users install that file directly; they do not need a development environment.
 
 Upload the same VSIX through the SuperEntity publisher in [Marketplace](https://marketplace.visualstudio.com/manage/publishers/superentity). Keep the publisher ID unchanged so GitHub and Marketplace packages share the extension ID `SuperEntity.agentscope`. Marketplace installations receive new versions when automatic updates are enabled. A GitHub release alone does not publish a Marketplace update.
