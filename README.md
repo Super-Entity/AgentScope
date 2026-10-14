@@ -1,6 +1,8 @@
-<p align="left"><img src="media/icon.png" alt="AgentScope" width="96" /></p>
+<h1>
+  <img src="media/icon.png" alt="AgentScope" width="96" align="middle" />
+  &nbsp;&nbsp;&nbsp;AgentScope
+</h1>
 
-# AgentScope
 
 Manage Read and Write access, project instructions and Explorer visibility from a single VS Code panel. AgentScope works with local folders, Git submodules and multi-root workspaces.
 
