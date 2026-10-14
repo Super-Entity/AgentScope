@@ -1,17 +1,19 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { loadWorkspace, loadWorkspaceForReconfiguration, buildApplyPlan, ApplyOptions } from './workspace';
 import { applyPlan, restoreChanges } from './transactions';
 import { assertDirectoryIdentity, captureDirectoryIdentity, normalizeRelative, resolveContained, verifyContained } from './core/paths';
 import { ACCESS_POLICY_FILE, readAccessRegistry, validateRegistry } from './core/registry';
 import { PolicyCheckpoint, checkpointKey, createCheckpoint, validateCheckpoint, checkpointFromLastApply, buildPolicyRecoveryPlan } from './recovery';
-import { selectedState, togglePathSelection, AccessKind } from './core/selection';
-import { listProjectChildren } from './browse';
+import { selectedState, selectionReader, togglePathSelection, AccessKind, SelectionChild, SelectionState } from './core/selection';
+import { inspectProjectEntry, listProjectChildren } from './browse';
 import { isResourcePath, listWorkspaceChildren, listWorkspaceSelectionRoots, workspaceSelectionState, resourceScope, toggleResourceSelection, toggleWorkspaceSelection, ResourceChild } from './resources';
 import { readPresets, writePreset, deletePreset, ScopePreset } from './presets';
 import { ScopeView, ScopeViewModel, PermissionRow } from './scopeView';
 import { ApplyPlan, FileChange, WorkspaceState } from './types';
+import type { CodexRuntime } from './core/runtimePaths';
 
 type ScopeNode = { kind: 'module'; name: string };
 
@@ -45,11 +47,12 @@ export function activate(context: vscode.ExtensionContext): void {
   let selectedPreset: string | null = null;
   let presetOptions: ApplyOptions | undefined;
 
-  function permissionRow(name: string, relative: string, directory: boolean, project = false, symbolicLink?: boolean): PermissionRow {
+  function permissionRow(name: string, relative: string, directory: boolean, project = false, symbolicLink?: boolean,
+    selection?: { read: SelectionState; write: SelectionState }): PermissionRow {
     const module = state().registry.submodules[name];
     return {
       name, relative, label: project ? name : path.posix.basename(relative), directory, project, symbolicLink,
-      read: selectedState(module, relative, 'read'), write: selectedState(module, relative, 'write'),
+      read: selection?.read ?? selectedState(module, relative, 'read'), write: selection?.write ?? selectedState(module, relative, 'write'),
       ...(project ? {
         enabled: module.enabled, hidden: state().hidden[name] === true, instruction: module.instruction_file,
         scope: { path: module.path, enabled: module.enabled, restrict_paths: module.restrict_paths,
@@ -62,13 +65,14 @@ export function activate(context: vscode.ExtensionContext): void {
     return !!currentState && !Object.values(currentState.registry.submodules).some(module => normalizeRelative(module.path) === '.');
   }
 
-  function workspaceResourceRow(relative: string, directory: boolean, selectable: boolean, symbolicLink?: boolean): PermissionRow {
-    const scope = resourceScope(state().registry);
+  function workspaceResourceRow(relative: string, directory: boolean, selectable: boolean, symbolicLink?: boolean,
+    selection?: { read: SelectionState; write: SelectionState }): PermissionRow {
+    const scope = relative === '.' || !selection ? resourceScope(state().registry) : undefined;
     return {
       target: 'resource', name: '@workspace', relative, label: relative === '.' ? 'Workspace files' : path.posix.basename(relative),
       directory, project: false, selectable, symbolicLink, hidden: state().resourceHidden?.[relative] === true,
-      read: relative === '.' ? workspaceSelectionState(state().registry, workspaceSelectionRoots, 'read') : selectedState(scope, relative, 'read'),
-      write: relative === '.' ? workspaceSelectionState(state().registry, workspaceSelectionRoots, 'write') : selectedState(scope, relative, 'write'),
+      read: relative === '.' ? workspaceSelectionState(state().registry, workspaceSelectionRoots, 'read') : selection?.read ?? selectedState(scope!, relative, 'read'),
+      write: relative === '.' ? workspaceSelectionState(state().registry, workspaceSelectionRoots, 'write') : selection?.write ?? selectedState(scope!, relative, 'write'),
       ...(relative === '.' ? { scope } : {}),
     };
   }
@@ -138,7 +142,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const warning = 'Workspace configuration changed outside AgentScope. Refresh before applying.';
       if (!currentState.warnings.includes(warning)) currentState.warnings.push(warning);
       update();
-    } else { void guarded(() => load(root, true)); }
+    } else { void guarded(() => load(root, true), false); }
   }
 
   function watchConfiguration(root: string): void {
@@ -239,7 +243,6 @@ export function activate(context: vscode.ExtensionContext): void {
   function reconcileWorkspaceFolders(): void {
     if (!selectedWorkspaceFolderPath || workspaceIsOpen()) return;
     clearWorkspace();
-    vscode.window.showInformationMessage('AgentScope: The selected workspace folder was removed. Select an open workspace to continue.');
   }
 
   function ensureWorkspace(current: WorkspaceState): void {
@@ -274,9 +277,11 @@ export function activate(context: vscode.ExtensionContext): void {
       const canonicalSelected = await verifyContained(selected, selected);
       selectedWorkspaceRoot = canonicalSelected;
       watchConfiguration(canonicalSelected);
+      const recoveryWarnings: string[] = [];
       try { await readSavedCheckpoint(canonicalSelected); }
-      catch (error) { vscode.window.showErrorMessage(`AgentScope: Recovery storage could not be read: ${errorMessage(error)}`); }
+      catch (error) { recoveryWarnings.push(`Recovery storage could not be read: ${errorMessage(error)}`); }
       const loadedState = await loadWorkspace(canonicalSelected);
+      loadedState.warnings.push(...recoveryWarnings);
       if (disposed) return;
       ensureWorkspaceOpen(canonicalSelected);
       currentState = loadedState;
@@ -441,24 +446,60 @@ export function activate(context: vscode.ExtensionContext): void {
     selectingPaths = true; update();
     try {
       const chosen = await vscode.window.showOpenDialog({ defaultUri: vscode.Uri.file(current.root),
-        canSelectFolders: true, canSelectFiles: false, canSelectMany: false, openLabel: 'Add project' });
+        canSelectFolders: true, canSelectFiles: false, canSelectMany: true, openLabel: 'Add projects' });
       ensureWorkspace(current);
       if (!chosen?.length) { return; }
-      const relative = normalizeRelative(path.relative(current.root, chosen[0].fsPath) || '.');
-      await verifyContained(current.root, resolveContained(current.root, relative));
-      const name = await vscode.window.showInputBox({ title: 'AgentScope: Project name', value: path.basename(chosen[0].fsPath),
-        validateInput: value => !value.trim() ? 'A name is required.' :
-          ['__proto__', 'constructor', 'prototype'].includes(value.trim()) || /[\x00-\x1f\x7f]/.test(value) ? 'Use a project name without reserved object names or control characters.' :
-          Object.hasOwn(current.registry.submodules, value.trim()) ? 'This project name already exists.' : undefined });
-      ensureWorkspace(current);
-      if (!name) { return; }
-      const key = name.trim();
-      const candidate = { ...current.registry, submodules: { ...current.registry.submodules,
-        [key]: { path: relative, enabled: false, restrict_paths: true,
-          read_paths: [], write_paths: [], instruction_file: null } } };
-      validateRegistry(candidate, current.root);
+      const paths: string[] = [];
+      for (const folder of chosen) {
+        if (folder.scheme !== 'file') throw new Error('Projects must be local folders within the selected workspace.');
+        const relative = normalizeRelative(path.relative(current.root, folder.fsPath) || '.');
+        const canonical = await verifyContained(current.root, resolveContained(current.root, relative));
+        if (!(await fs.stat(canonical)).isDirectory()) throw new Error('Select a project folder.');
+        ensureWorkspace(current);
+        paths.push(relative);
+      }
+      const candidate = { ...current.registry, submodules: { ...current.registry.submodules } };
+      const hidden = { ...current.hidden };
+      // An untouched disabled root is only an initial placeholder. Splitting it
+      // into child projects must never transfer a previous root access choice.
+      if (paths.every(relative => relative !== '.')) {
+        const fields = ['path', 'enabled', 'restrict_paths', 'read_paths', 'write_paths', 'instruction_file'];
+        for (const [name, module] of Object.entries(candidate.submodules)) {
+          if (normalizeRelative(module.path) === '.' && module.enabled === false && module.restrict_paths === true
+            && module.read_paths.length === 0 && module.write_paths.length === 0 && module.instruction_file === null
+            && Object.keys(module).every(field => fields.includes(field))) {
+            delete candidate.submodules[name]; delete hidden[name];
+          }
+        }
+      }
+      const validateName = (value: string): string | undefined => !value.trim() ? 'A name is required.' :
+        ['__proto__', 'constructor', 'prototype'].includes(value.trim()) || /[\x00-\x1f\x7f]/.test(value)
+          ? 'Invalid project name. Use a project name without reserved object names or control characters.' :
+          Object.hasOwn(candidate.submodules, value.trim()) ? 'This project name already exists.' : undefined;
+      for (let index = 0; index < chosen.length; index++) {
+        let name: string | undefined = path.basename(chosen[index].fsPath);
+        if (chosen.length === 1 || validateName(name)) {
+          name = await vscode.window.showInputBox({ title: 'AgentScope: Project name',
+            prompt: paths[index], value: name, validateInput: validateName });
+          ensureWorkspace(current);
+        }
+        if (!name) { return; }
+        const invalidName = validateName(name);
+        if (invalidName) throw new Error(invalidName);
+        const key = name.trim();
+        candidate.submodules[key] = { path: paths[index], enabled: false, restrict_paths: true,
+          read_paths: [], write_paths: [], instruction_file: null };
+        hidden[key] = false;
+      }
+      try { validateRegistry(candidate, current.root); }
+      catch (error) {
+        if (Object.values(candidate.submodules).some(module => normalizeRelative(module.path) === '.') && paths.some(relative => relative !== '.')) {
+          throw new Error('The workspace root is already registered with configured scope choices. Remove that project entry before adding child projects, or manage its folders within the existing project.');
+        }
+        throw error;
+      }
       current.registry = candidate;
-      current.hidden[key] = false; draft();
+      current.hidden = hidden; workspaceId++; draft();
     } finally { await refreshWorkspaceSelectionRoots(current); finishPathSelection(); }
   }
 
@@ -469,13 +510,21 @@ export function activate(context: vscode.ExtensionContext): void {
       profileName: config.get<string>('profileName', 'agentscope'),
       excludeFromSearch: config.get<boolean>('excludeFromSearch', true),
       allowNetwork: config.get<boolean>('allowCommandNetwork', false),
+      codexRuntime: config.get<CodexRuntime>('codexRuntime', 'auto'),
+      codexWorkspaceRoot: config.get<string>('codexWorkspaceRoot', ''),
     };
   }
 
   async function plan(): Promise<ApplyPlan> {
     const current = state();
     await ensureWritableWorkspace(current);
-    const result = await buildApplyPlan(current, presetOptions ?? configuredOptions());
+    const options = presetOptions ?? configuredOptions();
+    const runInWsl = vscode.workspace.getConfiguration('chatgpt', vscode.Uri.file(current.root))
+      .get<boolean>('runCodexInWindowsSubsystemForLinux', false);
+    const result = await buildApplyPlan(current, {
+      ...options,
+      codexRuntime: (options.codexRuntime ?? 'auto') === 'auto' && runInWsl ? 'wsl' : options.codexRuntime,
+    });
     ensureWorkspace(current);
     assertSavedDocuments(result);
     return result;
@@ -835,9 +884,12 @@ export function activate(context: vscode.ExtensionContext): void {
     if (selected) { await load(selected); }
   }
 
-  async function guarded(action: () => Promise<unknown>): Promise<void> {
+  async function guarded(action: () => Promise<unknown>, notify = true): Promise<void> {
     try { await action(); }
-    catch (error) { vscode.window.showErrorMessage(`AgentScope: ${errorMessage(error)}`); update(); }
+    catch (error) {
+      if (notify) void vscode.window.showErrorMessage(`AgentScope: ${errorMessage(error)}`);
+      update();
+    }
   }
 
   function receiveMessage(value: unknown): Promise<void> {
@@ -889,7 +941,8 @@ export function activate(context: vscode.ExtensionContext): void {
           try {
             const entries = await listWorkspaceChildren(current.root, current.registry, relative);
             if (currentState !== current) return;
-            await view.send({ ...response, rows: entries.map(entry => workspaceResourceRow(entry.relative, entry.directory, entry.selectable, entry.symbolicLink)) });
+            const selection = selectionReader(resourceScope(current.registry));
+            await view.send({ ...response, rows: entries.map(entry => workspaceResourceRow(entry.relative, entry.directory, entry.selectable, entry.symbolicLink, selection(entry.relative))) });
           } catch (error) { await view.send({ ...response, rows: [], error: errorMessage(error) }); }
           return;
         }
@@ -924,7 +977,8 @@ export function activate(context: vscode.ExtensionContext): void {
         try {
           const entries = await listProjectChildren(current.root, module.path, relative);
           if (currentState !== current) { return; }
-          await view.send({ ...response, rows: entries.map(entry => permissionRow(name, entry.relative, entry.directory, false, entry.symbolicLink)) });
+          const selection = selectionReader(module);
+          await view.send({ ...response, rows: entries.map(entry => permissionRow(name, entry.relative, entry.directory, false, entry.symbolicLink, selection(entry.relative))) });
         } catch (error) { await view.send({ ...response, rows: [], error: errorMessage(error) }); }
         return;
       }
@@ -935,17 +989,15 @@ export function activate(context: vscode.ExtensionContext): void {
       if (relative === '.' && !message.directory) { throw new Error('The project root is a folder.'); }
       selectingPaths = true; update();
       try {
+        let checkedEntry: SelectionChild | undefined;
         if (message.checked && relative !== '.') {
-          const parent = relative.includes('/') ? relative.slice(0, relative.lastIndexOf('/')) : '.';
-          const entries = await listProjectChildren(current.root, module.path, parent);
-          const key = (entry: string) => process.platform === 'win32' ? entry.toLowerCase() : entry;
-          const latest = entries.find(entry => key(entry.relative) === key(relative));
-          if (!latest || latest.directory !== message.directory) {
+          checkedEntry = await inspectProjectEntry(current.root, module.path, relative);
+          if (checkedEntry.directory !== message.directory) {
             throw new Error('This file or folder changed since it was displayed. Refresh before selecting access.');
           }
         }
         const next = await togglePathSelection(module, relative, message.access as AccessKind, message.checked,
-          (directory, options) => listProjectChildren(current.root, module.path, directory, options));
+          (directory, options) => checkedEntry ? Promise.resolve([checkedEntry]) : listProjectChildren(current.root, module.path, directory, options));
         if (currentState !== current) { throw new Error('The workspace changed during path selection. Select the path again.'); }
         current.registry.submodules[name] = next;
         current.dirty = true; selectedPreset = null;
@@ -965,7 +1017,8 @@ export function activate(context: vscode.ExtensionContext): void {
     return vscode.window.showTextDocument(vscode.Uri.file(target));
   }
 
-  async function changeProject(node: ScopeNode | undefined, change: (current: WorkspaceState, name: string) => void): Promise<void> {
+  async function changeProject(node: ScopeNode | undefined, change: (current: WorkspaceState, name: string) => void,
+    refreshResources = false): Promise<void> {
     trusted();
     const current = state();
     selectingPaths = true; update();
@@ -975,7 +1028,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!name) return;
       if (!Object.hasOwn(current.registry.submodules, name)) throw new Error('This project is not registered in the selected workspace.');
       change(current, name); draft();
-      await refreshWorkspaceSelectionRoots(current);
+      if (refreshResources) await refreshWorkspaceSelectionRoots(current);
     } finally { finishPathSelection(); }
   }
 
@@ -994,7 +1047,8 @@ export function activate(context: vscode.ExtensionContext): void {
     openCodex: () => openConfiguration('.codex/config.toml'),
     removeProject: (node?: ScopeNode) => changeProject(node, (current, name) => {
       delete current.registry.submodules[name]; delete current.hidden[name];
-    }),
+      workspaceId++;
+    }, true),
   };
   for (const [name, action] of Object.entries(actions)) {
     context.subscriptions.push(vscode.commands.registerCommand(`agentscope.${name}`, (...args) => guarded(() => action(...args))));
@@ -1008,7 +1062,10 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider('agentscope-preview', previews), previews, view, status,
     { dispose: () => { disposed = true; queuedReloadRoot = undefined; for (const watcher of watchers) { watcher.dispose(); } } });
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('agentscope.projects', view));
-  void guarded(() => load());
+  const initialFolders = vscode.workspace.workspaceFolders ?? [];
+  if (initialFolders.length === 1 && initialFolders[0].uri.scheme === 'file') {
+    void guarded(() => load(initialFolders[0].uri.fsPath), false);
+  } else { update(); }
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }

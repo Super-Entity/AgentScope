@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { normalizeRelative, resolveContained, verifyContained } from './core/paths';
+import { ContainedResolver, createContainedResolver, normalizeRelative, resolveContained } from './core/paths';
+import { mapConcurrent } from './core/concurrency';
 import { validateRegistry } from './core/registry';
 import { AccessKind, ListingOptions, SelectionChild, SelectionState, selectedState, togglePathSelection } from './core/selection';
 import { ModuleConfig, Registry } from './types';
@@ -44,25 +45,45 @@ export function selectedResourceState(registry: Registry, relative: string, acce
   return selectedState(resourceScope(registry), target, access);
 }
 
-interface ResourceContext { root: string; projects: string[]; canonicalProjects: string[] }
+interface ResourceContext { root: string; resolver: ContainedResolver; projects: string[]; canonicalProjects: string[] }
 
 async function context(root: string, registry: Registry): Promise<ResourceContext> {
-  const canonicalRoot = await fs.realpath(path.resolve(root));
-  validateRegistry(registry, canonicalRoot);
+  const resolver = await createContainedResolver(root);
+  validateRegistry(registry, resolver.root);
   const projects = projectPaths(registry);
-  const canonicalProjects = await Promise.all(projects.map(async project => {
-    const target = resolveContained(canonicalRoot, project);
-    const canonical = await verifyContained(canonicalRoot, target);
-    return normalizeRelative(path.relative(canonicalRoot, canonical) || '.');
-  }));
-  return { root: canonicalRoot, projects, canonicalProjects };
+  const canonicalProjects = await mapConcurrent(projects, 16, async project => {
+    const target = resolveContained(resolver.root, project);
+    const canonical = await resolver.resolve(target);
+    return normalizeRelative(path.relative(resolver.canonicalRoot, canonical) || '.');
+  });
+  return { root: resolver.root, resolver, projects, canonicalProjects };
 }
 
-async function canonicalRelative(state: ResourceContext, relative: string): Promise<string> {
-  const canonical = await verifyContained(state.root, resolveContained(state.root, relative));
-  const resolved = normalizeRelative(path.relative(state.root, canonical) || '.');
+async function assertUnchanged(state: ResourceContext): Promise<void> {
+  const latest = await mapConcurrent(state.projects, 16, async project => {
+    const canonical = await state.resolver.resolve(resolveContained(state.root, project));
+    return normalizeRelative(path.relative(state.resolver.canonicalRoot, canonical) || '.');
+  });
+  if (latest.some((project, index) => key(project) !== key(state.canonicalProjects[index]))) {
+    throw new Error('Registered project boundaries changed while reading workspace resources. Refresh before selecting access.');
+  }
+  await state.resolver.assertUnchanged();
+}
+
+async function canonicalRelative(state: ResourceContext, relative: string, existing = false): Promise<string> {
+  const target = resolveContained(state.root, relative);
+  const canonical = await (existing ? state.resolver.resolveExisting(target) : state.resolver.resolve(target));
+  const resolved = normalizeRelative(path.relative(state.resolver.canonicalRoot, canonical) || '.');
   if (metadata(resolved)) throw new Error(`A shared resource enters Git metadata through a link: ${relative}`);
   return resolved;
+}
+
+async function entryType(state: ResourceContext, relative: string, resolved: string): Promise<SelectionChild> {
+  const info = await fs.lstat(resolveContained(state.root, relative));
+  const symbolicLink = info.isSymbolicLink();
+  const followed = symbolicLink ? await fs.stat(resolveContained(state.resolver.canonicalRoot, resolved)) : info;
+  if (!followed.isDirectory() && !followed.isFile()) throw new Error(`The workspace entry is not a regular file or directory: ${relative}`);
+  return { relative, directory: followed.isDirectory(), ...(symbolicLink ? { symbolicLink: true } : {}) };
 }
 
 function insideProject(state: ResourceContext, relative: string, canonical: string): boolean {
@@ -81,14 +102,20 @@ export async function listWorkspaceChildren(
   root: string, registry: Registry, relative: string = '.', options: ListingOptions = {},
 ): Promise<ResourceChild[]> {
   const state = await context(root, registry);
+  const children = await listChildren(state, relative, options);
+  await assertUnchanged(state);
+  return children;
+}
+
+async function listChildren(state: ResourceContext, relative: string, options: ListingOptions = {}): Promise<ResourceChild[]> {
   const directory = normalizeRelative(relative);
   if (metadata(directory)) throw new Error('Git metadata cannot be browsed as a workspace resource.');
-  const canonical = await canonicalRelative(state, directory);
+  const canonical = await canonicalRelative(state, directory, true);
   if (insideProject(state, directory, canonical)) throw new Error(`Workspace resources cannot browse a registered project: ${directory}`);
-  const directoryPath = resolveContained(state.root, directory);
+  const directoryPath = resolveContained(state.resolver.canonicalRoot, canonical);
   if (!(await fs.stat(directoryPath)).isDirectory()) throw new Error(`The selected workspace path is not a folder: ${directory}`);
   const entries = await fs.readdir(directoryPath, { withFileTypes: true });
-  const children = await Promise.all(entries.map(async (entry): Promise<ResourceChild | null> => {
+  const children = await mapConcurrent(entries, 32, async (entry): Promise<ResourceChild | null> => {
     const literal = directory === '.' ? entry.name : `${directory}/${entry.name}`;
     try {
       const childRelative = normalizeRelative(literal);
@@ -97,28 +124,41 @@ export async function listWorkspaceChildren(
       if (state.projects.some(project => contains(project, childRelative))) {
         throw new Error(`Registered project is excluded from workspace resources: ${literal}`);
       }
-      const resolved = await canonicalRelative(state, childRelative);
+      const resolved = await canonicalRelative(state, childRelative, true);
       if (insideProject(state, childRelative, resolved)) throw new Error(`A workspace resource enters a registered project through a link: ${literal}`);
-      const childPath = resolveContained(state.root, childRelative);
-      const info = await fs.lstat(childPath);
-      const symbolicLink = info.isSymbolicLink();
-      const followed = symbolicLink ? await fs.stat(childPath) : info;
-      if (!followed.isDirectory() && !followed.isFile()) throw new Error(`The workspace entry is not a regular file or directory: ${literal}`);
+      const child = await entryType(state, childRelative, resolved);
       const selectable = canSelect(state, childRelative, resolved);
       if (options.strict && !selectable) throw new Error(`A workspace resource folder contains a registered project boundary: ${literal}`);
-      return {
-        relative: childRelative, directory: followed.isDirectory(), selectable,
-        ...(symbolicLink ? { symbolicLink: true } : {}),
-      };
+      return { ...child, selectable };
     } catch (error) {
       if (options.strict) throw new Error(`Cannot safely list ${literal}: ${(error as Error).message}`);
       return null;
     }
-  }));
+  });
   return children.filter((child): child is ResourceChild => child !== null).sort((first, second) => {
     if (first.directory !== second.directory) return first.directory ? -1 : 1;
     return key(first.relative) < key(second.relative) ? -1 : key(first.relative) > key(second.relative) ? 1 : 0;
   });
+}
+
+async function validateGrants(state: ResourceContext, draft: Registry): Promise<void> {
+  const grants = new Set([...draft.shared_resources.read_paths, ...draft.shared_resources.write_paths].map(normalizeRelative));
+  await mapConcurrent([...grants], 16, async relative => {
+    if (!isResourcePath(draft, relative) || !canSelect(state, relative, await canonicalRelative(state, relative))) {
+      throw new Error(`A shared resource overlaps a registered project or Git metadata: ${relative}`);
+    }
+  });
+}
+
+async function validateClickedEntry(state: ResourceContext, relative: string, resolved: string, directory: boolean): Promise<SelectionChild> {
+  let child: SelectionChild;
+  try { child = await entryType(state, relative, resolved); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    throw new Error('This workspace file or folder changed since it was displayed. Refresh before selecting access.');
+  }
+  if (child.directory !== directory) throw new Error('This workspace file or folder changed since it was displayed. Refresh before selecting access.');
+  return child;
 }
 
 /** Produce a shared-resource draft without modifying files, projects or the caller's registry. */
@@ -131,28 +171,19 @@ export async function toggleResourceSelection(
   const state = await context(root, registry);
   const resolved = await canonicalRelative(state, target);
   if (!canSelect(state, target, resolved)) throw new Error(`A workspace resource overlaps a registered project or workspace root through a link: ${target}`);
-  if (checked) {
-    const children = await listWorkspaceChildren(root, registry, parent(target));
-    const latest = children.find(child => key(child.relative) === key(target));
-    if (!latest || !latest.selectable || latest.directory !== directory) {
-      throw new Error('This workspace file or folder changed since it was displayed. Refresh before selecting access.');
-    }
-  }
+  const selected = checked ? await validateClickedEntry(state, target, resolved, directory) : undefined;
   const updated = await togglePathSelection(resourceScope(registry), target, access, checked,
-    (folder, options) => listWorkspaceChildren(root, registry, folder, options));
+    (folder, options) => selected ? Promise.resolve([selected]) : listChildren(state, folder, options));
   const resources = {
     ...registry.shared_resources,
     read_paths: [...updated.read_paths], write_paths: [...updated.write_paths],
   };
   const draft = { ...registry, shared_resources: resources };
   validateRegistry(draft, state.root);
-  // Validate every resulting grant physically as well as lexically before publishing the draft.
-  for (const grant of [...resources.read_paths, ...resources.write_paths]) {
-    const normalized = normalizeRelative(grant);
-    if (!isResourcePath(draft, normalized) || !canSelect(state, normalized, await canonicalRelative(state, normalized))) {
-      throw new Error(`A shared resource overlaps a registered project or Git metadata: ${grant}`);
-    }
-  }
+  // Recheck resulting grants against current targets before publishing the draft.
+  await validateGrants(state, draft);
+  if (checked) await validateClickedEntry(state, target, await canonicalRelative(state, target), directory);
+  await assertUnchanged(state);
   return resources;
 }
 
@@ -162,46 +193,47 @@ export async function toggleResourceSelection(
  * The workspace root itself is a UI aggregate, never a persisted access grant.
  */
 export async function listWorkspaceSelectionRoots(root: string, registry: Registry): Promise<ResourceChild[]> {
-  return selectionRoots(await context(root, registry));
+  const state = await context(root, registry);
+  const roots = await selectionRoots(state);
+  await assertUnchanged(state);
+  return roots;
 }
 
 async function selectionRoots(state: ResourceContext): Promise<ResourceChild[]> {
   if (state.projects.includes('.') || state.canonicalProjects.includes('.')) return [];
   const result: ResourceChild[] = [];
   const visit = async (directory: string): Promise<void> => {
-    const directoryPath = resolveContained(state.root, directory);
-    const canonical = await canonicalRelative(state, directory);
+    const canonical = await canonicalRelative(state, directory, true);
     if (insideProject(state, directory, canonical)) return;
+    const directoryPath = resolveContained(state.resolver.canonicalRoot, canonical);
     const entries = await fs.readdir(directoryPath, { withFileTypes: true });
-    for (const entry of entries) {
+    const next = await mapConcurrent(entries, 32, async (entry): Promise<{ child?: ResourceChild; directory?: string }> => {
       const literal = directory === '.' ? entry.name : `${directory}/${entry.name}`;
       let relative: string;
       try { relative = normalizeRelative(literal); }
-      catch { continue; } // Filenames that cannot form portable literal scopes are not granted.
-      if (metadata(relative) || state.projects.some(project => contains(project, relative))) continue;
-      const target = resolveContained(state.root, relative);
+      catch { return {}; } // Filenames that cannot form portable literal scopes are not granted.
+      if (metadata(relative) || state.projects.some(project => contains(project, relative))) return {};
       let resolved: string;
-      let info;
+      let child: SelectionChild;
       try {
-        resolved = await canonicalRelative(state, relative);
-        info = await fs.lstat(target);
+        resolved = await canonicalRelative(state, relative, true);
+        child = await entryType(state, relative, resolved);
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
-        if (code === 'ENOENT' || code === 'ELOOP') continue;
-        if (!code && /^(?:A symbolic link or junction leaves|Cannot resolve a broken symbolic link|A shared resource enters Git metadata through a link)/i.test((error as Error).message)) continue;
-        throw error; // Permission or filesystem failures must not produce a partial broad selection.
+        if (code === 'ENOENT' || code === 'ELOOP') return {};
+        if (!code && /^(?:A symbolic link or junction leaves|Cannot resolve a broken symbolic link|A shared resource enters Git metadata through a link|The workspace entry is not a regular file or directory)/i.test((error as Error).message)) return {};
+        throw error; // Filesystem failures must not produce a partial broad selection.
       }
-      if (insideProject(state, relative, resolved)) continue;
-      const symbolicLink = info.isSymbolicLink();
-      const followed = symbolicLink ? await fs.stat(target) : info;
-      if (!followed.isDirectory() && !followed.isFile()) continue;
-      if (canSelect(state, relative, resolved)) {
-        result.push({ relative, directory: followed.isDirectory(), selectable: true, ...(symbolicLink ? { symbolicLink: true } : {}) });
-      } else if (followed.isDirectory() && !symbolicLink
+      if (insideProject(state, relative, resolved)) return {};
+      if (canSelect(state, relative, resolved)) return { child: { ...child, selectable: true } };
+      if (child.directory && !child.symbolicLink
         && (state.projects.some(project => contains(relative, project))
-          || state.canonicalProjects.some(project => contains(resolved, project)))) {
-        await visit(relative);
-      }
+          || state.canonicalProjects.some(project => contains(resolved, project)))) return { directory: relative };
+      return {};
+    });
+    for (const item of next) {
+      if (item.child) result.push(item.child);
+      else if (item.directory) await visit(item.directory);
     }
   };
   await visit('.');
@@ -255,11 +287,7 @@ export async function toggleWorkspaceSelection(
   }
   const draft = { ...registry, shared_resources: resources };
   validateRegistry(draft, state.root);
-  for (const grant of [...resources.read_paths, ...resources.write_paths]) {
-    const relative = normalizeRelative(grant);
-    if (!isResourcePath(draft, relative) || !canSelect(state, relative, await canonicalRelative(state, relative))) {
-      throw new Error(`A shared resource overlaps a registered project or Git metadata: ${grant}`);
-    }
-  }
+  await validateGrants(state, draft);
+  await assertUnchanged(state);
   return resources;
 }

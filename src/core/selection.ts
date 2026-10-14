@@ -37,12 +37,7 @@ function compact(paths: string[]): string[] {
   return result.sort((a, b) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0);
 }
 
-export function selectedState(module: ModuleConfig, relative: string, kind: AccessKind): SelectionState {
-  checkKind(kind);
-  const target = normalizedPath(relative);
-  if (module.enabled !== true) return { checked: false, partial: false, inherited: false };
-  const scopes = module.restrict_paths === false ? ['.']
-    : compact(kind === 'write' ? module.write_paths : [...module.read_paths, ...module.write_paths]);
+function stateFromScopes(target: string, scopes: string[]): SelectionState {
   const covering = scopes.filter(scope => contains(scope, target));
   const checked = covering.length > 0;
   return {
@@ -50,6 +45,24 @@ export function selectedState(module: ModuleConfig, relative: string, kind: Acce
     partial: !checked && scopes.some(scope => contains(target, scope)),
     inherited: checked && covering.some(scope => !same(scope, target)),
   };
+}
+
+/** Normalize a scope once when producing many rows from the same draft snapshot. */
+export function selectionReader(module: ModuleConfig): (relative: string) => { read: SelectionState; write: SelectionState } {
+  const read = module.enabled !== true ? [] : module.restrict_paths === false ? ['.'] : compact([...module.read_paths, ...module.write_paths]);
+  const write = module.enabled !== true ? [] : module.restrict_paths === false ? ['.'] : compact(module.write_paths);
+  return relative => {
+    const target = normalizedPath(relative);
+    return { read: stateFromScopes(target, read), write: stateFromScopes(target, write) };
+  };
+}
+
+export function selectedState(module: ModuleConfig, relative: string, kind: AccessKind): SelectionState {
+  checkKind(kind);
+  const target = normalizedPath(relative);
+  const scopes = module.enabled !== true ? [] : module.restrict_paths === false ? ['.']
+    : compact(kind === 'write' ? module.write_paths : [...module.read_paths, ...module.write_paths]);
+  return stateFromScopes(target, scopes);
 }
 
 function grant(paths: string[], target: string): string[] { return compact([...paths, target]); }

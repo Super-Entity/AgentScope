@@ -27,6 +27,7 @@ interface ChildrenResponse {
 
 interface PersistenceOptions {
   multiRoot?: boolean;
+  leaveWorkspaceUnselected?: boolean;
   failCheckpointSave?: boolean;
   initialCheckpoint?: (root: string) => unknown;
   initialPending?: (root: string) => unknown;
@@ -75,6 +76,7 @@ async function activateInFixture(t: TestContext, isTrusted = true, failBackupSav
   const openAnswers: unknown[] = [];
   const workspaceFolderListeners = new Set<() => void>();
   const configuration: Record<string, unknown> = {};
+  const chatgptConfiguration: Record<string, unknown> = {};
   const textDocuments: Array<{ isDirty: boolean; uri: MockUri; fileName: string }> = [];
   const watcherPatterns: string[] = [];
   type FileEvent = 'change' | 'create' | 'delete';
@@ -148,7 +150,12 @@ async function activateInFixture(t: TestContext, isTrusted = true, failBackupSav
         return typeof answer === 'function' ? answer(items, options) : answer;
       },
       showOpenDialog: async () => openAnswers.shift(),
-      showInputBox: async () => { await beforePresetInput.shift()?.(); return inputAnswers.shift(); },
+      showInputBox: async () => {
+        // Native input arrives after the host has published its queued busy state.
+        await Promise.resolve();
+        await beforePresetInput.shift()?.();
+        return inputAnswers.shift();
+      },
       showTextDocument: async (uri: MockUri) => { openedDocuments.push(uri); return undefined; },
     },
     workspace: {
@@ -159,8 +166,9 @@ async function activateInFixture(t: TestContext, isTrusted = true, failBackupSav
       ] : [{ name: path.basename(root), uri: MockUri.file(root), index: 0 }],
       textDocuments,
       getConfiguration: (section: string, uri: MockUri) => {
-        assert.equal(section, 'agentscope'); assert.equal(uri.fsPath, root);
-        return { get: (name: string, fallback: unknown) => Object.hasOwn(configuration, name) ? configuration[name] : fallback };
+        assert.ok(section === 'agentscope' || section === 'chatgpt'); assert.equal(uri.fsPath, root);
+        const values = section === 'agentscope' ? configuration : chatgptConfiguration;
+        return { get: (name: string, fallback: unknown) => Object.hasOwn(values, name) ? values[name] : fallback };
       },
       createFileSystemWatcher: (pattern: { base: string; pattern: string }) => {
         assert.equal(pattern.base, root); watcherPatterns.push(pattern.pattern);
@@ -321,10 +329,14 @@ async function activateInFixture(t: TestContext, isTrusted = true, failBackupSav
     try { (require('../extension') as typeof import('../extension')).activate(context); }
     finally { loader._load = originalLoad; }
     assert.ok(provider, 'Register a WebviewViewProvider rather than a native TreeView');
-    const loaded = waitForPosted(posted => posted.type === 'state' && posted.state.workspace !== null && !posted.state.busy, 'Workspace load');
+    const loaded = waitForPosted(posted => posted.type === 'state' && !posted.state.busy &&
+      (persistence.multiRoot ? posted.state.workspace === null : posted.state.workspace !== null), 'Workspace load');
     await provider.resolveWebviewView(view, {}, { isCancellationRequested: false });
     await emit({ type: 'ready' });
     await loaded;
+    if (persistence.multiRoot && !persistence.leaveWorkspaceUnselected) {
+      await commands.get('agentscope.selectWorkspace')!();
+    }
     await new Promise<void>(resolve => setImmediate(resolve));
   };
   const restart = async (): Promise<void> => {
@@ -353,7 +365,7 @@ async function activateInFixture(t: TestContext, isTrusted = true, failBackupSav
     for (const listener of workspaceFolderListeners) listener();
   };
   return { root, state, scope, projectRow, webview, messages, originals, errors, confirmations, informationMessages, nativeCommand,
-    backups, durable, storageControl, restart, dispatch, command, toggle, children, read, inputAnswers, quickAnswers, warningAnswers, configuration,
+    backups, durable, storageControl, restart, dispatch, command, toggle, children, read, inputAnswers, quickAnswers, warningAnswers, configuration, chatgptConfiguration,
     textDocuments, watcherPatterns, activeWatcherPatterns, fireFileEvent, emitFileEvent, waitForState,
     pauseNextLoadedSnapshot, openedDocuments, beforeApplyConfirmation, beforeRestoreConfirmation, quickPickPrompts, previewProviders, executeCalls, closePreviewDocument,
     beforePresetInput, beforePresetConfirmation, beforeBackupSave, openAnswers, removeSelectedWorkspace };
@@ -531,6 +543,28 @@ test('Untrusted workspaces cannot save, activate or delete presets', async (t) =
   for (const action of ['savePreset', 'activatePreset', 'deletePreset']) await ui.command(action);
   assert.equal(ui.errors.length, 3); assert.ok(ui.errors.every(error => /Trust the workspace/.test(error)));
   await assert.rejects(fs.stat(path.join(ui.root, '.vscode', 'agentscope-presets.json')), { code: 'ENOENT' });
+  assert.equal(ui.state().dirty, false);
+});
+
+test('Explicit Apply uses the selected Codex runtime root and preserves local policy paths', async (t) => {
+  const ui = await activateInFixture(t, true, false, { enabled: true });
+  ui.configuration.codexRuntime = 'auto';
+  ui.configuration.codexWorkspaceRoot = '/mnt/d/MyApps';
+  ui.chatgptConfiguration.runCodexInWindowsSubsystemForLinux = true;
+  assert.equal(await ui.read('.codex/config.toml'), ui.originals.get('.codex/config.toml'));
+  assert.equal(ui.confirmations.length, 0);
+
+  await ui.command('apply');
+  assert.deepEqual(ui.errors, []);
+  const codex = TOML.parse(await ui.read('.codex/config.toml')) as Record<string, any>;
+  const filesystem = codex.permissions.agentscope.filesystem;
+  assert.equal(filesystem['/mnt/d/MyApps/.agentscope/access.md'], 'read');
+  assert.equal(filesystem['/mnt/d/MyApps/project/references'], 'read');
+  assert.equal(filesystem['/mnt/d/MyApps/project/drafts'], 'write');
+  assert.equal(filesystem[path.join(ui.root, ACCESS_POLICY_FILE)], undefined);
+  assert.equal(filesystem[':workspace_roots'], undefined, 'The profile must use only the explicitly selected workspace');
+  assert.equal(filesystem['/mnt/d/MyApps'], undefined, 'Mapping does not grant the entire root');
+  assert.equal(readAccessRegistry(await ui.read('AGENTS.md'), await ui.read(ACCESS_POLICY_FILE))!.submodules.project.path, 'project');
   assert.equal(ui.state().dirty, false);
 });
 
@@ -839,7 +873,7 @@ test('Policy watcher failures keep the workspace selected and automatically reco
       else await fs.writeFile(policyPath, 'Invalid linked policy.\n', 'utf8');
       await ui.emitFileEvent(ACCESS_POLICY_FILE, failure === 'missing' ? 'delete' : 'change');
 
-      assert.equal(ui.errors.length, 1);
+      assert.equal(ui.errors.length, 0, 'Background policy errors are shown in the panel without popups');
       assert.equal(ui.state().workspace, path.basename(ui.root));
       assert.match(ui.state().configurationError ?? '', /access\.md/);
       assert.equal(ui.state().message, ui.state().configurationError, 'Show the actual configuration error in the retained workspace');
@@ -853,9 +887,9 @@ test('Policy watcher failures keep the workspace selected and automatically reco
       assert.equal(ui.openedDocuments.at(-1)?.fsPath, path.join(ui.root, 'AGENTS.md'));
       await ui.command('openCodex');
       assert.equal(ui.openedDocuments.at(-1)?.fsPath, path.join(ui.root, '.codex', 'config.toml'));
-      assert.equal(ui.errors.length, 1);
+      assert.equal(ui.errors.length, 0);
       await ui.command('apply');
-      assert.equal(ui.errors.length, 2);
+      assert.equal(ui.errors.length, 1);
       assert.equal(ui.confirmations.length, confirmations);
       assert.deepEqual(ui.backups.get(`backup:${ui.root}`), previousBackup);
       assert.equal(await ui.read('AGENTS.md'), agents);
@@ -864,7 +898,7 @@ test('Policy watcher failures keep the workspace selected and automatically reco
 
       await fs.writeFile(policyPath, access, 'utf8');
       await ui.emitFileEvent(ACCESS_POLICY_FILE, failure === 'missing' ? 'create' : 'change');
-      assert.equal(ui.errors.length, 2);
+      assert.equal(ui.errors.length, 1);
       assert.equal(ui.state().workspace, path.basename(ui.root));
       assert.equal(ui.state().configurationError, null);
       assert.deepEqual(ui.scope(), scope);
@@ -878,19 +912,28 @@ test('Policy watcher failures keep the workspace selected and automatically reco
   }
 });
 
-test('An initially broken access policy is observed before loading and recovers through its create event', async (t) => {
+test('An initially missing access policy stays inline without startup notifications or automatic repairs', async (t) => {
   const expected = registry({ project: project({ enabled: true, read_paths: ['references/nested/paper.md'], write_paths: [] }) });
   const files = writeAccessFiles(policy(expected), null, expected);
   const ui = await activateInFixture(t, true, false, {}, async root => {
     await fs.mkdir(path.join(root, '.agentscope'));
     await fs.writeFile(path.join(root, 'AGENTS.md'), files.agents, 'utf8');
   });
-  assert.equal(ui.errors.length, 1);
+  assert.equal(ui.errors.length, 0);
+  assert.deepEqual(ui.informationMessages, []);
+  assert.deepEqual(ui.quickPickPrompts, []);
   assert.equal(ui.state().workspace, path.basename(ui.root));
   assert.match(ui.state().configurationError ?? '', /access\.md/);
   assert.deepEqual(ui.state().projects, []);
   assert.equal(ui.state().resources, undefined);
   assert.equal(ui.activeWatcherPatterns().length, 5, 'Initial policy loading failures must leave repair events subscribed');
+  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+
+  await ui.nativeCommand('refresh');
+  assert.equal(ui.errors.length, 1, 'An explicit failed Refresh reports its error once');
+  assert.match(ui.errors[0], /access\.md/);
+  assert.equal(ui.state().configurationError !== null, true);
+  assert.equal(await ui.read('AGENTS.md'), files.agents);
   await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
 
   await fs.writeFile(path.join(ui.root, ACCESS_POLICY_FILE), files.access, 'utf8');
@@ -903,6 +946,24 @@ test('An initially broken access policy is observed before loading and recovers 
   assert.equal(await ui.read(ACCESS_POLICY_FILE), files.access);
   assert.equal(ui.confirmations.length, 0);
   assert.equal(ui.backups.size, 0);
+});
+
+test('Multi-root startup waits for an explicit workspace selection without opening a picker', async (t) => {
+  const ui = await activateInFixture(t, true, false, {}, undefined, { multiRoot: true, leaveWorkspaceUnselected: true });
+  assert.equal(ui.state().workspace, null);
+  assert.deepEqual(ui.state().projects, []);
+  assert.deepEqual(ui.quickPickPrompts, []);
+  assert.deepEqual(ui.errors, []);
+  assert.deepEqual(ui.informationMessages, []);
+  assert.equal(ui.activeWatcherPatterns().length, 0);
+  assert.equal(await ui.read('AGENTS.md'), ui.originals.get('AGENTS.md'));
+  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+
+  await ui.nativeCommand('selectWorkspace');
+  assert.equal(ui.quickPickPrompts.length, 1);
+  assert.equal(ui.state().workspace, path.basename(ui.root));
+  assert.equal(ui.state().projects.length, 1);
+  assert.deepEqual(ui.errors, []);
 });
 
 test('Delete and create events arriving during a workspace load queue a fresh snapshot instead of losing the latest policy', async (t) => {
@@ -933,7 +994,7 @@ test('Delete and create events arriving during a workspace load queue a fresh sn
   paused.release();
   await failed;
   await new Promise<void>(resolve => setImmediate(resolve));
-  assert.equal(ui.errors.length, 1);
+  assert.equal(ui.errors.length, 0, 'Queued background reload errors remain inline');
   assert.equal(ui.state().workspace, path.basename(ui.root));
   assert.deepEqual(ui.state().projects, []);
   assert.equal(ui.state().resources, undefined);
@@ -1285,9 +1346,10 @@ test('Reconfigure turns corrupt policy into an empty editable draft and Apply ke
   assert.equal(await ui.read('AGENTS.md'), agents); assert.equal(await ui.read(ACCESS_POLICY_FILE), broken);
 });
 
-test('A new ordinary workspace without configuration starts disabled and creates policies on its first precise Apply', async (t) => {
+test('A new ordinary project without configuration starts disabled and creates policies on its first precise Apply', async (t) => {
   const ui = await activateInFixture(t, true, false, {}, async root => {
     for (const file of ['AGENTS.md', '.vscode/settings.json', '.codex/config.toml']) await fs.unlink(path.join(root, file));
+    await fs.writeFile(path.join(root, 'package.json'), '{}\n');
   });
   assert.deepEqual(ui.errors, []); assert.equal(ui.state().configurationError, null);
   assert.equal(ui.state().recoveryAvailable, false); assert.equal(ui.state().projects.length, 1);
@@ -1908,4 +1970,100 @@ test('Preset writes recheck an editor that becomes dirty after transaction stagi
   assert.match(ui.errors.at(-1)!, /Save or discard.*agentscope-presets/i);
   assert.equal(await ui.read('.vscode/agentscope-presets.json'), before);
   assert.deepEqual((await fs.readdir(path.dirname(target))).sort(), ['settings.json', 'agentscope-presets.json'].sort());
+});
+
+
+test('The panel discovers ordinary sibling folders when no access registration exists', async (t) => {
+  const ui = await activateInFixture(t, true, false, {}, async (root) => {
+    await fs.unlink(path.join(root, 'AGENTS.md'));
+    await fs.mkdir(path.join(root, 'Sibling'));
+  });
+  assert.deepEqual(ui.state().projects.map(row => row.scope?.path).sort(), ['Instructions', 'Sibling', 'project']);
+  assert.ok(ui.state().projects.every(row => row.enabled === false && row.scope?.restrict_paths === true));
+  assert.ok(ui.state().resources);
+  assert.deepEqual(ui.errors, []);
+  await assert.rejects(fs.stat(path.join(ui.root, 'AGENTS.md')), { code: 'ENOENT' });
+});
+
+test('Adding multiple child folders replaces an empty disabled root without transferring access', async (t) => {
+  const ui = await activateInFixture(t, true, false, { path: '.', read_paths: [], write_paths: [] });
+  const original = await ui.read('AGENTS.md');
+  const previousWorkspaceId = ui.state().workspaceId;
+  ui.openAnswers.push([MockUri.file(path.join(ui.root, 'project')), MockUri.file(path.join(ui.root, 'Instructions'))]);
+  await ui.nativeCommand('addFolder');
+  assert.ok(ui.state().workspaceId > previousWorkspaceId, 'New project boundaries must invalidate previously loaded folder rows');
+  assert.deepEqual(ui.state().projects.map(row => row.scope?.path).sort(), ['Instructions', 'project']);
+  for (const row of ui.state().projects) {
+    assert.equal(row.scope?.enabled, false);
+    assert.equal(row.scope?.restrict_paths, true);
+    assert.deepEqual(row.scope?.read_paths, []);
+    assert.deepEqual(row.scope?.write_paths, []);
+    assert.equal(row.scope?.instruction_file, null);
+  }
+  assert.ok(ui.state().resources);
+  assert.equal(ui.state().dirty, true);
+  assert.equal(await ui.read('AGENTS.md'), original, 'Adding folders must remain a draft until Apply');
+  await ui.nativeCommand('apply');
+  const saved = readAccessRegistry(await ui.read('AGENTS.md'), await ui.read(ACCESS_POLICY_FILE));
+  assert.deepEqual(Object.values(saved!.submodules).map(module => module.path).sort(), ['Instructions', 'project']);
+  assert.deepEqual(ui.errors, []);
+});
+
+test('Adding child projects preserves a disabled root with existing scope choices', async (t) => {
+  const ui = await activateInFixture(t, true, false, { path: '.', read_paths: ['project/references'], write_paths: [] });
+  const original = await ui.read('AGENTS.md');
+  const before = structuredClone(ui.state().projects);
+  ui.openAnswers.push([MockUri.file(path.join(ui.root, 'project'))]);
+  ui.inputAnswers.push('Child');
+  await ui.nativeCommand('addFolder');
+  assert.match(ui.errors.at(-1)!, /root.*configured scope choices.*Remove that project entry/i);
+  assert.deepEqual(ui.state().projects, before);
+  assert.equal(ui.state().dirty, false);
+  assert.equal(await ui.read('AGENTS.md'), original);
+});
+
+test('A multi-folder selection with an outside path aborts without removing the empty root', async (t) => {
+  const ui = await activateInFixture(t, true, false, { path: '.', read_paths: [], write_paths: [] });
+  const original = await ui.read('AGENTS.md');
+  ui.openAnswers.push([MockUri.file(path.join(ui.root, 'project')), MockUri.file(path.join(path.dirname(ui.root), 'outside'))]);
+  await ui.nativeCommand('addFolder');
+  assert.match(ui.errors.at(-1)!, /traverse|parent|outside/i);
+  assert.equal(ui.scope().path, '.');
+  assert.equal(ui.state().projects.length, 1);
+  assert.equal(ui.state().dirty, false);
+  assert.equal(await ui.read('AGENTS.md'), original);
+});
+
+test('Selecting one displayed project file validates that entry without rescanning sibling directories', async (t) => {
+  const ui = await activateInFixture(t);
+  const file = await findPathRow(ui, 'references/nested/paper.md');
+  const original = await ui.read('AGENTS.md');
+  const readdir = fs.readdir.bind(fs);
+  const listings: string[] = [];
+  t.mock.method(fs, 'readdir', async (...args: Parameters<typeof fs.readdir>) => {
+    listings.push(String(args[0]));
+    return readdir(...args);
+  });
+  await ui.toggle(file, 'write', true);
+  assert.deepEqual(listings, [], 'A leaf grant must not enumerate all of its siblings');
+  assert.deepEqual(ui.scope().write_paths, ['references/nested/paper.md']);
+  assert.deepEqual(ui.scope().read_paths, []);
+  assert.equal(await ui.read('AGENTS.md'), original);
+  assert.deepEqual(ui.errors, []);
+});
+
+test('Visibility and enable toggles reuse the displayed resource frontier', async (t) => {
+  const ui = await activateInFixture(t);
+  const readdir = fs.readdir.bind(fs);
+  const listings: string[] = [];
+  t.mock.method(fs, 'readdir', async (...args: Parameters<typeof fs.readdir>) => {
+    listings.push(String(args[0]));
+    return readdir(...args);
+  });
+  await ui.command('toggleVisibility', 'project');
+  await ui.command('toggleAccess', 'project');
+  assert.deepEqual(listings, [], 'Changing project flags does not change workspace resource boundaries');
+  assert.equal(ui.projectRow().hidden, true);
+  assert.equal(ui.scope().enabled, true);
+  assert.deepEqual(ui.errors, []);
 });

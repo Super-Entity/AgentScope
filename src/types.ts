@@ -18,6 +18,8 @@ export interface DiscoveredModule { name: string; path: string }
 
 export interface ProfileOptions {
   root: string;
+  /** The same selected workspace as seen by the Codex runtime (for example WSL). */
+  runtimeRoot?: string;
   profileName: string;
   allowNetwork: boolean;
   /** Exact Git paths already resolved and verified to belong to enabled modules. */

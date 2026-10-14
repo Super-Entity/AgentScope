@@ -361,3 +361,61 @@ test('Aggregate resource selection rejects unexpected listing failures and retar
   await assert.rejects(toggleWorkspaceSelection(root, fresh, 'write', true), /Denied listing/);
   assert.deepEqual(fresh.shared_resources, { read_paths: [], write_paths: [] });
 });
+
+
+test('Checking a resource validates only that entry and does not enumerate its siblings', async (t) => {
+  const { root } = await fixture(t);
+  const value = resources();
+  await fs.mkdir(path.join(root, 'Instructions'));
+  await Promise.all(Array.from({ length: 48 }, (_, index) => fs.writeFile(path.join(root, 'Instructions', `file-${index}.md`), 'leaf')));
+  const original = structuredClone(value);
+  t.mock.method(fs, 'readdir', async () => { throw new Error('A clicked resource must not scan its sibling directory'); });
+  const updated = await toggleResourceSelection(root, value, 'Instructions/file-0.md', 'write', true, false);
+  assert.deepEqual(updated, { read_paths: [], write_paths: ['Instructions/file-0.md'] });
+  assert.deepEqual(value, original);
+});
+
+test('Scoped resource contexts reject a project alias retargeted during an aggregate selection', async (t) => {
+  const { root } = await fixture(t);
+  const value = emptyRegistry();
+  value.submodules.library = project({ path: 'library', enabled: false, read_paths: [], write_paths: [] });
+  await fs.mkdir(path.join(root, 'private'));
+  await fs.mkdir(path.join(root, 'shared'));
+  await directoryLink(path.join(root, 'private'), path.join(root, 'library'));
+  const original = structuredClone(value);
+  const readdir = fs.readdir.bind(fs);
+  let retargeted = false;
+  t.mock.method(fs, 'readdir', async (...args: Parameters<typeof fs.readdir>) => {
+    const entries = await readdir(...args);
+    if (String(args[0]) === root && !retargeted) {
+      retargeted = true;
+      await fs.unlink(path.join(root, 'library'));
+      await directoryLink(path.join(root, 'shared'), path.join(root, 'library'));
+    }
+    return entries;
+  });
+  await assert.rejects(toggleWorkspaceSelection(root, value, 'write', true), /project boundaries changed.*Refresh/i);
+  assert.equal(retargeted, true);
+  assert.deepEqual(value, original);
+});
+
+test('A clicked resource changed from a file to a directory during validation cannot gain a folder grant', async (t) => {
+  const { root } = await fixture(t);
+  const value = resources();
+  await fs.mkdir(path.join(root, 'Instructions'));
+  const target = path.join(root, 'Instructions', 'leaf.md');
+  await fs.writeFile(target, 'leaf');
+  const original = structuredClone(value);
+  const lstat = fs.lstat.bind(fs);
+  let checks = 0;
+  t.mock.method(fs, 'lstat', async (...args: Parameters<typeof fs.lstat>) => {
+    const info = await lstat(...args);
+    if (String(args[0]) === target && ++checks === 2) {
+      await fs.rename(target, target + '-old');
+      await fs.mkdir(target);
+    }
+    return info;
+  });
+  await assert.rejects(toggleResourceSelection(root, value, 'Instructions/leaf.md', 'write', true, false), /changed.*Refresh/i);
+  assert.deepEqual(value, original);
+});

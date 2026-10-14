@@ -575,3 +575,89 @@ test('A failed reference write rolls back the new sidecar and preserves original
   await assert.rejects(fs.stat(path.join(root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
   assert.deepEqual(await fs.readdir(root), ['AGENTS.md']);
 });
+
+
+test('Plain container workspaces discover immediate ordinary folders and keep loose files as resources', async (t) => {
+  const { root, outside } = await fixture(t);
+  for (const directory of ['Alpha/src', 'Beta', '.cache', 'node_modules', '__pycache__', '.vscode']) {
+    await fs.mkdir(path.join(root, directory), { recursive: true });
+  }
+  await fs.writeFile(path.join(root, 'Alpha', 'src', 'hidden-content.ts'), 'Project content must not be scanned.\n');
+  await fs.writeFile(path.join(root, 'README.md'), 'Shared workspace notes.\n');
+  await fs.writeFile(path.join(root, '.vscode', 'settings.json'), '{ "files.exclude": { "Beta": true } }');
+  await directoryLink(outside, path.join(root, 'Linked'));
+  const readdir = fs.readdir.bind(fs);
+  const enumerated: string[] = [];
+  const listing = t.mock.method(fs, 'readdir', async (...args: Parameters<typeof fs.readdir>) => {
+    enumerated.push(String(args[0]));
+    assert.equal(String(args[0]), root, 'Initial discovery must never recurse into projects or linked folders');
+    return readdir(...args);
+  });
+  const state = await loadWorkspace(root);
+  assert.deepEqual(state.registry.submodules, {
+    Alpha: project({ path: 'Alpha', enabled: false, read_paths: [], write_paths: [] }),
+    Beta: project({ path: 'Beta', enabled: false, read_paths: [], write_paths: [] }),
+  });
+  assert.deepEqual(enumerated, [root]);
+  assert.equal(state.hidden.Beta, true);
+  assert.equal(state.dirty, false);
+  listing.mock.restore();
+  state.registry.shared_resources = await toggleResourceSelection(root, state.registry, 'README.md', 'read', true, false);
+  assert.deepEqual(state.registry.shared_resources.read_paths, ['README.md']);
+  await assert.rejects(fs.stat(path.join(root, 'AGENTS.md')), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+});
+
+test('Ordinary project manifests and Git roots keep their own folders within one root project', async (t) => {
+  for (const marker of ['package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod', 'Example.sln', '.git']) {
+    await t.test(marker, async (child) => {
+      const { root } = await fixture(child);
+      await fs.mkdir(path.join(root, 'src'));
+      await fs.mkdir(path.join(root, 'docs'));
+      if (marker === '.git') await fs.mkdir(path.join(root, marker));
+      else await fs.writeFile(path.join(root, marker), 'Root project manifest.\n');
+      const state = await loadWorkspace(root);
+      assert.deepEqual(Object.values(state.registry.submodules), [project({ path: '.', enabled: false, read_paths: [], write_paths: [] })]);
+    });
+  }
+});
+
+test('Saved ordinary and explicitly empty registrations do not trigger folder discovery', async (t) => {
+  for (const saved of [emptyRegistry(), { ...emptyRegistry(), submodules: { selected: project({ path: 'Alpha', enabled: false }) } }]) {
+    const { root } = await fixture(t);
+    await fs.mkdir(path.join(root, 'Alpha'));
+    await fs.mkdir(path.join(root, 'Unregistered'));
+    await fs.writeFile(path.join(root, 'AGENTS.md'), policy(saved));
+    const readdir = t.mock.method(fs, 'readdir', async () => { throw new Error('Saved registration must not enumerate workspace folders'); });
+    try { assert.deepEqual((await loadWorkspace(root)).registry, saved); }
+    finally { readdir.mock.restore(); }
+  }
+});
+
+test('Applying discovered folder scopes keeps a sibling project disabled and preserves root resources', async (t) => {
+  const { root } = await fixture(t);
+  await fs.mkdir(path.join(root, 'Alpha'));
+  await fs.mkdir(path.join(root, 'Beta'));
+  await fs.writeFile(path.join(root, 'Alpha', 'chosen.md'), 'Selected leaf.\n');
+  await fs.writeFile(path.join(root, 'Beta', 'private.md'), 'Disabled sibling.\n');
+  await fs.writeFile(path.join(root, 'README.md'), 'Root notes.\n');
+  const state = await loadWorkspace(root);
+  state.registry.submodules.Alpha.enabled = true;
+  state.registry.submodules.Alpha.read_paths = ['chosen.md'];
+  state.registry.shared_resources.read_paths = ['README.md'];
+  state.hidden.Beta = true;
+  await applyPlan(await buildApplyPlan(state, options));
+  const saved = await loadWorkspace(root);
+  assert.deepEqual(saved.registry, state.registry);
+  assert.equal(saved.registry.submodules.Beta.enabled, false);
+  assert.deepEqual(saved.registry.submodules.Beta.read_paths, []);
+  assert.equal(saved.hidden.Beta, true);
+  assert.equal(await fs.readFile(path.join(root, 'README.md'), 'utf8'), 'Root notes.\n');
+  assert.equal(await fs.readFile(path.join(root, 'Beta', 'private.md'), 'utf8'), 'Disabled sibling.\n');
+  const scopes = filesystem(await fs.readFile(path.join(root, '.codex', 'config.toml'), 'utf8'));
+  assert.equal(scopes[path.join(root, 'Alpha', 'chosen.md')], 'read');
+  assert.equal(scopes[path.join(root, 'README.md')], 'read');
+  assert.equal(scopes[path.join(root, 'Beta')], 'deny');
+  assert.equal(scopes[path.join(root, 'Alpha')], undefined);
+  assert.deepEqual((await buildApplyPlan(saved, options)).changes, []);
+});

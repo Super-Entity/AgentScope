@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.5
+
+- Discover ordinary child folders in new container workspaces alongside Git submodules, with disabled access defaults and preserved saved registrations.
+- Register multiple workspace folders together and replace an unconfigured root placeholder when adding child projects.
+- Generate filesystem paths for the selected Codex runtime, including Windows-to-WSL drive mapping and optional custom workspace roots.
+- Keep startup and background configuration errors in the panel without notifications. Multi-root workspaces wait for an explicit folder selection.
+- Offer optional policy recovery beside configuration errors; configuration files change only through explicit actions.
+- Reuse unchanged permission rows, cache normalized project selections and visible row indices, and combine repeated sidebar refreshes into one update.
+- Reduce filesystem calls with operation-scoped path resolution and bounded parallel browsing; validate selected files without listing their siblings and avoid rescanning resources when toggling project flags.
+- Parse workspace settings once per load and deduplicate repeated scope checks within a preview while retaining fresh checks before configuration writes.
+
 ## 0.7.4
 
 - Create the package output directory before building, so packaging works from a fresh clone on Windows, macOS and Linux.

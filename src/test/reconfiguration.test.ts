@@ -199,3 +199,23 @@ test('Conflicting or overlapping registration metadata stops repair instead of s
   await assert.rejects(loadWorkspaceForReconfiguration(root, invalid), /Project roots overlap/);
   assert.deepEqual(await fs.readdir(root), ['.gitmodules']);
 });
+
+
+test('Fresh access reconfiguration discovers ordinary sibling projects without old grants', async (t) => {
+  const { root, outside } = await fixture(t);
+  await fs.mkdir(path.join(root, 'Alpha'));
+  await fs.mkdir(path.join(root, 'Beta'));
+  await fs.mkdir(path.join(root, '.cache'));
+  await fs.writeFile(path.join(root, 'README.md'), 'Workspace resource.\n');
+  await directoryLink(outside, path.join(root, 'Linked'));
+  const state = await loadWorkspaceForReconfiguration(root);
+  assert.deepEqual(state.registry.submodules, {
+    Alpha: project({ path: 'Alpha', enabled: false, read_paths: [], write_paths: [] }),
+    Beta: project({ path: 'Beta', enabled: false, read_paths: [], write_paths: [] }),
+  });
+  assert.deepEqual(state.registry.shared_resources, { read_paths: [], write_paths: [] });
+  assert.equal(state.reconfigurePolicy, true);
+  await assert.rejects(fs.stat(path.join(root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+  await applyPlan(await buildApplyPlan(state, options));
+  assert.deepEqual((await loadWorkspace(root)).registry, state.registry);
+});

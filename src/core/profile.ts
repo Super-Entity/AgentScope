@@ -4,6 +4,7 @@ import * as TOML from '@iarna/toml';
 import { ProfileOptions, ProfileOutput, Registry } from '../types';
 import { normalizeRelative, resolveContained } from './paths';
 import { ACCESS_POLICY_FILE, validateRegistry } from './registry';
+import { profileTarget, runtimeWorkspaceRoot } from './runtimePaths';
 
 const profilePattern = /^[A-Za-z][A-Za-z0-9_-]*$/;
 const legacySandboxKeys = ['sandbox_mode', 'sandbox_workspace_write', 'sandbox_read_only', 'sandbox_danger_full_access'];
@@ -22,17 +23,20 @@ export function generateProfile(registry: Registry, options: ProfileOptions): Pr
   if (typeof options.allowNetwork !== 'boolean') { throw new Error('The network setting must be true or false.'); }
   validateRegistry(registry, options.root);
   const root = path.resolve(options.root);
+  const runtimeRoot = options.runtimeRoot ?? runtimeWorkspaceRoot(root);
+  const targetPath = (target: string): string => profileTarget(root, target, runtimeRoot);
   const entries = new Map<string, 'deny' | 'read' | 'write'>([[':root', 'deny'], [':minimal', 'read'], [':tmpdir', 'write']]);
   const grant = (target: string, mode: 'read' | 'write'): void => {
-    const previous = entries.get(target);
-    if (previous !== 'write') { entries.set(target, mode); }
+    const runtimeTarget = targetPath(target);
+    const previous = entries.get(runtimeTarget);
+    if (previous !== 'write') { entries.set(runtimeTarget, mode); }
   };
   for (const policy of ['AGENTS.md', ACCESS_POLICY_FILE, '.gitmodules', '.codex']) { grant(resolveContained(root, policy), 'read'); }
   for (const resource of registry.shared_resources.read_paths) { grant(resolveContained(root, resource), 'read'); }
   for (const resource of registry.shared_resources.write_paths) { grant(resolveContained(root, resource), 'write'); }
   for (const module of Object.values(registry.submodules)) {
     const moduleRoot = resolveContained(root, module.path);
-    if (!module.enabled) { entries.set(moduleRoot, 'deny'); continue; }
+    if (!module.enabled) { entries.set(targetPath(moduleRoot), 'deny'); continue; }
     if (!module.restrict_paths) { grant(moduleRoot, 'write'); }
     else {
       for (const relative of module.read_paths) { grant(resolveContained(moduleRoot, relative), 'read'); }

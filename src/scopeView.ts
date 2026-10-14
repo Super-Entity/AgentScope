@@ -40,6 +40,7 @@ export interface ScopeViewModel {
 export class ScopeView implements vscode.WebviewViewProvider, vscode.Disposable {
   private view: vscode.WebviewView | undefined;
   private listeners: vscode.Disposable[] = [];
+  private refreshQueued = false;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -71,7 +72,14 @@ export class ScopeView implements vscode.WebviewViewProvider, vscode.Disposable 
   }
 
   refresh(): void {
-    void this.send({ type: 'state', state: this.getModel() }).catch(() => undefined);
+    if (!this.view || this.refreshQueued) return;
+    this.refreshQueued = true;
+    queueMicrotask(() => {
+      this.refreshQueued = false;
+      void (async () => {
+        if (this.view) await this.send({ type: 'state', state: this.getModel() });
+      })().catch(() => undefined);
+    });
   }
 
   async send(message: unknown): Promise<void> {
@@ -109,7 +117,7 @@ export class ScopeView implements vscode.WebviewViewProvider, vscode.Disposable 
     <div class="toolbar" role="toolbar" aria-label="Workspace actions">
       <button class="icon-button" data-command="refresh" title="Refresh configuration" aria-label="Refresh configuration">${icon('<path d="M20 5v5h-5M20 10a8 8 0 1 0 0 4"/>')}<span class="sr-only">Refresh</span></button>
       <button class="icon-button" id="collapse-all" title="Collapse all expanded projects and workspace folders" aria-label="Collapse all expanded folders">${icon('<path d="m7 10 5-5 5 5M7 19l5-5 5 5"/>')}<span class="sr-only">Collapse all</span></button>
-      <button class="icon-button" data-command="addFolder" title="Add a project folder" aria-label="Add a project folder">${icon('<path d="M3 8V6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M9 14h6m-3-3v6"/>')}<span class="sr-only">Add</span></button>
+      <button class="icon-button" data-command="addFolder" title="Add workspace folders as projects; Git is optional" aria-label="Add workspace folders">${icon('<path d="M3 8V6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M9 14h6m-3-3v6"/>')}<span class="sr-only">Add</span></button>
       <button class="icon-button" data-command="preview" title="Preview configuration changes" aria-label="Preview configuration changes">${icon('<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>')}<span class="sr-only">Preview</span></button>
       <details class="more apply-menu">
         <summary class="icon-button primary" title="Apply or preview changes" aria-label="Apply or preview changes">${icon('<path d="m5 12 4 4L19 6"/>')}<span class="sr-only">Apply</span></summary>
@@ -143,14 +151,14 @@ export class ScopeView implements vscode.WebviewViewProvider, vscode.Disposable 
   <p id="status" role="status" aria-live="polite">Loading workspace…</p>
   <p id="preset" class="preset-status" role="status" aria-live="polite" hidden></p>
   <p id="notice" class="notice" hidden></p>
-  <p id="configuration-actions" class="configuration-actions" hidden><button type="button" class="link-button" data-command="reconfigure" title="Start fresh Read and Write selections, then Apply">Reconfigure access</button></p>
+  <p id="configuration-actions" class="configuration-actions" hidden><button type="button" class="link-button" data-command="reconfigure" title="Start fresh Read and Write selections, then Apply">Reconfigure access</button><button id="recover-saved" type="button" class="link-button" data-command="recover" title="Restore the last valid AGENTS.md and access policy" hidden>Recover saved configuration</button></p>
   <div class="table-wrap">
     <table id="permissions" role="treegrid" aria-label="Project and workspace file permissions">
-      <thead><tr><th scope="col">Project / path</th><th scope="col" class="permission-heading">Read</th><th scope="col" class="permission-heading">Write</th><th scope="col"><span class="sr-only">Path actions</span></th></tr></thead>
+      <thead><tr><th scope="col">Folder / path</th><th scope="col" class="permission-heading">Read</th><th scope="col" class="permission-heading">Write</th><th scope="col"><span class="sr-only">Path actions</span></th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
   </div>
-  <p class="help">Folder checks include descendants. Write also permits Read. Changes stay in the draft until Apply.</p>
+  <p class="help">Ordinary folders and Git submodules use the same controls. Folder checks include descendants. Write also permits Read. Changes stay in the draft until Apply.</p>
   <script nonce="${nonce}" src="${script}"></script>
 </body>
 </html>`;

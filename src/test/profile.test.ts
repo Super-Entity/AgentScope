@@ -44,6 +44,47 @@ test('An enabled restricted project with empty paths receives no project grant',
   assert.equal(output.network.enabled, true);
 });
 
+test('Runtime path mapping translates every grant and deny while keeping the selected workspace anchor', async (t) => {
+  const { root } = await fixture(t);
+  const value = registry({ secret: project({ path: 'secret', enabled: false }) });
+  const runtimeRoot = '/mnt/d/MyApps';
+  const gitRead = path.join(root, 'project', '.git');
+  const gitWrite = path.join(root, '.git', 'modules', 'project');
+  const output = parsedProfile(generateProfile(value, {
+    root, runtimeRoot, profileName: 'agentscope', allowNetwork: false,
+    gitReadPaths: [gitRead], gitWritePaths: [gitWrite],
+  }).text);
+  assert.equal(output.filesystem['/mnt/d/MyApps/.agentscope/access.md'], 'read');
+  assert.equal(output.filesystem['/mnt/d/MyApps/Instructions'], 'read');
+  assert.equal(output.filesystem['/mnt/d/MyApps/project/references'], 'read');
+  assert.equal(output.filesystem['/mnt/d/MyApps/project/drafts'], 'write');
+  assert.equal(output.filesystem['/mnt/d/MyApps/secret'], 'deny');
+  assert.equal(output.filesystem['/mnt/d/MyApps/project/.git'], 'read');
+  assert.equal(output.filesystem['/mnt/d/MyApps/.git/modules/project'], 'write');
+  assert.equal(output.filesystem[runtimeRoot], undefined, 'Mapping must not grant the workspace root');
+  assert.equal(output.filesystem[':workspace_roots'], undefined, 'Choices must not repeat across unrelated workspace roots');
+  assert.equal(Object.keys(output.filesystem).some(key => key.startsWith(root)), false);
+});
+
+test('Runtime path overrides never bypass local Git metadata containment checks', async (t) => {
+  const { root, outside } = await fixture(t);
+  assert.throws(() => generateProfile(registry(), {
+    root, runtimeRoot: '/mnt/d/MyApps', profileName: 'agentscope', allowNetwork: false, gitWritePaths: [outside],
+  }), /Git metadata/);
+  for (const runtimeRoot of ['relative/workspace', '/mnt/d/../other', ':workspace_roots']) {
+    assert.throws(() => generateProfile(registry(), { root, runtimeRoot, profileName: 'agentscope', allowNetwork: false }));
+  }
+});
+
+test('An actual selected filesystem root remains a valid resolved runtime anchor', () => {
+  const root = path.parse(process.cwd()).root;
+  const output = parsedProfile(generateProfile(emptyRegistry(), {
+    root, runtimeRoot: root, profileName: 'agentscope', allowNetwork: false,
+  }).text);
+  assert.equal(output.filesystem[path.join(root, ACCESS_POLICY_FILE)], 'read');
+  assert.equal(output.filesystem[root], undefined);
+});
+
 test('An ordinary repository profile grants selected subtrees without granting the whole root', async (t) => {
   const { root } = await fixture(t);
   const value = emptyRegistry();

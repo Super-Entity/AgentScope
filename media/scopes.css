@@ -60,7 +60,7 @@ tr:focus-within { background: var(--vscode-list-focusBackground, var(--vscode-li
 body.vscode-high-contrast button, body.vscode-high-contrast-light button { border-color: var(--vscode-contrastBorder); }
 body.vscode-high-contrast tr:focus-within, body.vscode-high-contrast-light tr:focus-within { outline: 1px solid var(--vscode-contrastActiveBorder); outline-offset: -1px; }
 @media (forced-colors: active) { button, input { forced-color-adjust: auto; } tr:focus-within { outline: 1px solid Highlight; } }
-.configuration-actions { margin: -4px 8px 12px; }
+.configuration-actions { display: flex; flex-wrap: wrap; gap: 8px 14px; margin: -4px 8px 12px; }
 .link-button { padding: 0; min-height: auto; border: 0; border-radius: 0; background: transparent; color: var(--vscode-textLink-foreground); text-decoration: underline; text-align: left; }
 .link-button:not(:disabled):hover { background: transparent; color: var(--vscode-textLink-activeForeground); }
 .link-button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 3px; }

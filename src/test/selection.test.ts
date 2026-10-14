@@ -1,9 +1,29 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { selectedState, togglePathSelection } from '../core/selection';
+import { selectedState, selectionReader, togglePathSelection } from '../core/selection';
 import { project } from './helpers';
 
 interface Child { relative: string; directory: boolean; symbolicLink?: boolean }
+
+test('Batch selection readers retain precise read/write state for one draft snapshot', () => {
+  for (const module of [
+    project({ read_paths: ['src/a.ts', 'src/a.ts', 'docs'], write_paths: ['src/nested', 'drafts'] }),
+    project({ restrict_paths: false }),
+    project({ enabled: false }),
+  ]) {
+    const read = selectionReader(module);
+    for (const relative of ['.', 'src', 'src/a.ts', 'src/nested/a.ts', 'docs', 'drafts/new.md', 'other.md']) {
+      assert.deepEqual(read(relative), { read: selectedState(module, relative, 'read'), write: selectedState(module, relative, 'write') });
+    }
+    assert.throws(() => read('../outside'));
+    assert.throws(() => read('.git/config'));
+  }
+  const module = project({ write_paths: ['src'] });
+  const snapshot = selectionReader(module);
+  module.write_paths = ['docs'];
+  assert.equal(snapshot('src').write.checked, true);
+  assert.equal(selectionReader(module)('src').write.checked, false);
+});
 
 function tree() {
   const directories: Record<string, Child[]> = {

@@ -1,8 +1,9 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { updateExcludesSettings } from './core/excludes';
-import { assertDirectoryIdentity, captureDirectoryIdentity, normalizeRelative, resolveContained, verifyContained } from './core/paths';
+import { assertDirectoryIdentity, captureDirectoryIdentity, ContainedResolver, createContainedResolver, normalizeRelative, resolveContained, verifyContained } from './core/paths';
 import { generateProfile, updateCodexConfig } from './core/profile';
+import { CodexRuntime, runtimeWorkspaceRoot } from './core/runtimePaths';
 import { ACCESS_POLICY_FILE, emptyRegistry, parseGitmodules, parseJsoncStrict, readAccessRegistry, readAgentsRegistry, validateRegistry, writeAccessFiles, writeReconfiguredAccessFiles } from './core/registry';
 import { ApplyPlan, DiscoveredModule, FileChange, ModuleConfig, Registry, WorkspaceState } from './types';
 import { isResourcePath } from './resources';
@@ -12,6 +13,8 @@ export interface ApplyOptions {
   profileName: string;
   excludeFromSearch: boolean;
   allowNetwork: boolean;
+  codexRuntime?: CodexRuntime;
+  codexWorkspaceRoot?: string;
 }
 
 const agentsFile = 'AGENTS.md';
@@ -37,9 +40,9 @@ function rejectMetadataScope(root: string, target: string): void {
 }
 
 /** Configuration writes never traverse a file link or a linked configuration directory. */
-async function configurationPath(root: string, relative: string): Promise<string> {
+async function configurationPath(root: string, relative: string, resolver?: ContainedResolver): Promise<string> {
   const target = resolveContained(root, relative);
-  const canonical = await verifyContained(root, target);
+  const canonical = resolver ? await resolver.resolve(target) : await verifyContained(root, target);
   if (comparable(target) !== comparable(canonical)) {
     throw new Error(`Refusing a symbolic link or junction in a configuration path: ${relative}`);
   }
@@ -55,30 +58,41 @@ async function readOptional(target: string): Promise<string | null> {
   catch (error) { if (missing(error)) return null; throw error; }
 }
 
-async function readConfiguration(root: string, relative: string): Promise<{ path: string; text: string | null }> {
-  const target = await configurationPath(root, relative);
+async function readConfiguration(root: string, relative: string, resolver: ContainedResolver): Promise<{ path: string; text: string | null }> {
+  const target = await configurationPath(root, relative, resolver);
   return { path: target, text: await readOptional(target) };
 }
 
-function exactHidden(settings: string | null, module: ModuleConfig): boolean {
-  if (normalizeRelative(module.path) === '.') return false;
-  if (!settings?.trim()) return false;
+async function readWorkspaceConfiguration(root: string): Promise<Array<{ path: string; text: string | null }>> {
+  const resolver = await createContainedResolver(root);
+  const files = await Promise.all([
+    readConfiguration(root, agentsFile, resolver),
+    readConfiguration(root, ACCESS_POLICY_FILE, resolver),
+    readConfiguration(root, gitmodulesFile, resolver),
+    readConfiguration(root, settingsFile, resolver),
+  ]);
+  await resolver.assertUnchanged();
+  return files;
+}
+
+function settingsExclusions(settings: string | null): Record<string, unknown> | undefined {
+  if (!settings?.trim()) return undefined;
   const value = parseJsoncStrict(settings, 'VS Code settings');
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('VS Code settings must be a JSON/JSONC object.');
   const excludes = (value as Record<string, unknown>)['files.exclude'];
-  if (excludes === undefined) return false;
+  if (excludes === undefined) return undefined;
   if (!excludes || typeof excludes !== 'object' || Array.isArray(excludes)) throw new Error('files.exclude must be an object of exclusion patterns.');
-  return (excludes as Record<string, unknown>)[normalizeRelative(module.path)] === true;
+  return excludes as Record<string, unknown>;
 }
 
-function resourceVisibility(settings: string | null, registry: Registry): Record<string, boolean> {
+function exactHidden(excludes: Record<string, unknown> | undefined, module: ModuleConfig): boolean {
+  const relative = normalizeRelative(module.path);
+  return relative !== '.' && excludes?.[relative] === true;
+}
+
+function resourceVisibility(excludes: Record<string, unknown> | undefined, registry: Registry): Record<string, boolean> {
   const hidden: Record<string, boolean> = Object.create(null);
-  if (!settings?.trim()) return hidden;
-  const value = parseJsoncStrict(settings, 'VS Code settings') as Record<string, unknown>;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('VS Code settings must be a JSON/JSONC object.');
-  const excludes = value['files.exclude'];
   if (excludes === undefined) return hidden;
-  if (!excludes || typeof excludes !== 'object' || Array.isArray(excludes)) throw new Error('files.exclude must be an object of exclusion patterns.');
   for (const [literal, choice] of Object.entries(excludes)) {
     if (typeof choice !== 'boolean') continue;
     try {
@@ -90,16 +104,56 @@ function resourceVisibility(settings: string | null, registry: Registry): Record
   return hidden;
 }
 
-/** Read exactly the policy, module manifest and editor settings; never scan project content. */
+const rootProjectMarkers = new Set([
+  '.git', 'package.json', 'Cargo.toml', 'go.mod', 'pyproject.toml', 'setup.py', 'setup.cfg',
+  'pom.xml', 'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts',
+  'composer.json', 'Gemfile', 'mix.exs', 'pubspec.yaml', 'CMakeLists.txt', 'Makefile',
+]);
+const generatedDirectories = new Set(['node_modules', '__pycache__']);
+const reservedProjectNames = new Set(['__proto__', 'prototype', 'constructor']);
+
+function disabledProject(relative: string): ModuleConfig {
+  return { path: relative, enabled: false, restrict_paths: true, read_paths: [], write_paths: [], instruction_file: null };
+}
+
+/** Initial registration uses root entry names only; it never opens or recurses into project content. */
+async function discoverOrdinaryProjects(root: string, warnings: string[]): Promise<DiscoveredModule[]> {
+  const entries = await fs.readdir(root, { withFileTypes: true });
+  const rootProject = entries.some(entry => rootProjectMarkers.has(entry.name)
+    || /\.(?:sln|slnx|csproj|fsproj|vbproj)$/i.test(entry.name));
+  const projects: DiscoveredModule[] = [];
+  if (!rootProject) {
+    const names = new Set<string>();
+    for (const entry of entries.sort((first, second) => first.name < second.name ? -1 : first.name > second.name ? 1 : 0)) {
+      if (!entry.isDirectory() || entry.name.startsWith('.') || generatedDirectories.has(entry.name)) continue;
+      let relative: string;
+      try {
+        relative = normalizeRelative(entry.name);
+        if (relative !== entry.name) throw new Error('the directory name is not a canonical scope path');
+      } catch (error) {
+        warnings.push(`${entry.name}: initial folder discovery skipped an unsupported scope path (${(error as Error).message}).`);
+        continue;
+      }
+      const base = reservedProjectNames.has(entry.name) ? `${entry.name} project` : entry.name;
+      let name = base;
+      for (let suffix = 2; names.has(name); suffix++) name = `${base} (${suffix})`;
+      names.add(name);
+      projects.push({ name, path: relative });
+    }
+  }
+  if (projects.length === 0) {
+    let name = path.basename(root) || 'Workspace';
+    if (reservedProjectNames.has(name)) name = 'Workspace';
+    projects.push({ name, path: '.' });
+  }
+  return projects;
+}
+
+/** Read configuration and, only without saved registration, enumerate immediate ordinary folders. */
 export async function loadWorkspace(root: string): Promise<WorkspaceState> {
   const canonicalRoot = await fs.realpath(path.resolve(root));
   const rootIdentity = await captureDirectoryIdentity(canonicalRoot);
-  const [agents, access, gitmodules, settings] = await Promise.all([
-    readConfiguration(canonicalRoot, agentsFile),
-    readConfiguration(canonicalRoot, ACCESS_POLICY_FILE),
-    readConfiguration(canonicalRoot, gitmodulesFile),
-    readConfiguration(canonicalRoot, settingsFile),
-  ]);
+  const [agents, access, gitmodules, settings] = await readWorkspaceConfiguration(canonicalRoot);
   const existingRegistry = readAccessRegistry(agents.text ?? '', access.text);
   const registry = existingRegistry ?? emptyRegistry();
   const discovered = parseGitmodules(gitmodules.text ?? '');
@@ -108,12 +162,9 @@ export async function loadWorkspace(root: string): Promise<WorkspaceState> {
     warnings.push('AGENTS.md is missing. Apply will recreate its access reference; saved access settings are preserved.');
   }
   if (existingRegistry === null && discovered.length === 0) {
-    let name = path.basename(canonicalRoot) || 'Workspace';
-    if (['__proto__', 'prototype', 'constructor'].includes(name)) name = 'Workspace';
-    registry.submodules[name] = {
-      path: '.', enabled: false, restrict_paths: true,
-      read_paths: [], write_paths: [], instruction_file: null,
-    };
+    for (const module of await discoverOrdinaryProjects(canonicalRoot, warnings)) {
+      registry.submodules[module.name] = disabledProject(module.path);
+    }
   }
   for (const module of discovered) {
     if (['__proto__', 'prototype', 'constructor'].includes(module.name)) throw new Error(`Unsupported submodule name: ${module.name}`);
@@ -141,11 +192,12 @@ export async function loadWorkspace(root: string): Promise<WorkspaceState> {
     };
   }
   validateRegistry(registry, canonicalRoot);
+  const excludes = settingsExclusions(settings.text);
   const hidden: Record<string, boolean> = {};
-  for (const [name, module] of Object.entries(registry.submodules)) hidden[name] = exactHidden(settings.text, module);
+  for (const [name, module] of Object.entries(registry.submodules)) hidden[name] = exactHidden(excludes, module);
   await assertDirectoryIdentity(canonicalRoot, rootIdentity);
   return {
-    root: canonicalRoot, rootIdentity, registry, hidden, resourceHidden: resourceVisibility(settings.text, registry), dirty: false, warnings,
+    root: canonicalRoot, rootIdentity, registry, hidden, resourceHidden: resourceVisibility(excludes, registry), dirty: false, warnings,
     files: { [agents.path]: agents.text, [access.path]: access.text, [gitmodules.path]: gitmodules.text, [settings.path]: settings.text },
   };
 }
@@ -157,12 +209,7 @@ export async function loadWorkspace(root: string): Promise<WorkspaceState> {
 export async function loadWorkspaceForReconfiguration(root: string, registrationRegistry?: Registry): Promise<WorkspaceState> {
   const canonicalRoot = await fs.realpath(path.resolve(root));
   const rootIdentity = await captureDirectoryIdentity(canonicalRoot);
-  const [agents, access, gitmodules, settings] = await Promise.all([
-    readConfiguration(canonicalRoot, agentsFile),
-    readConfiguration(canonicalRoot, ACCESS_POLICY_FILE),
-    readConfiguration(canonicalRoot, gitmodulesFile),
-    readConfiguration(canonicalRoot, settingsFile),
-  ]);
+  const [agents, access, gitmodules, settings] = await readWorkspaceConfiguration(canonicalRoot);
   const registry = emptyRegistry();
   const warnings = ['Access reconfiguration is a draft. All previous Read and Write choices have been cleared; select the intended scopes and Apply to rebuild the policy.'];
   const registrations: Array<{ label: string; modules: DiscoveredModule[] }> = [];
@@ -209,19 +256,17 @@ export async function loadWorkspaceForReconfiguration(root: string, registration
     }
   }
   if (Object.keys(registry.submodules).length === 0) {
-    let name = path.basename(canonicalRoot) || 'Workspace';
-    if (['__proto__', 'prototype', 'constructor'].includes(name)) name = 'Workspace';
-    registry.submodules[name] = {
-      path: '.', enabled: false, restrict_paths: true,
-      read_paths: [], write_paths: [], instruction_file: null,
-    };
+    for (const module of await discoverOrdinaryProjects(canonicalRoot, warnings)) {
+      registry.submodules[module.name] = disabledProject(module.path);
+    }
   }
   validateRegistry(registry, canonicalRoot);
+  const excludes = settingsExclusions(settings.text);
   const hidden: Record<string, boolean> = {};
-  for (const [name, module] of Object.entries(registry.submodules)) hidden[name] = exactHidden(settings.text, module);
+  for (const [name, module] of Object.entries(registry.submodules)) hidden[name] = exactHidden(excludes, module);
   await assertDirectoryIdentity(canonicalRoot, rootIdentity);
   return {
-    root: canonicalRoot, rootIdentity, registry, hidden, resourceHidden: resourceVisibility(settings.text, registry),
+    root: canonicalRoot, rootIdentity, registry, hidden, resourceHidden: resourceVisibility(excludes, registry),
     dirty: true, reconfigurePolicy: true, warnings,
     files: { [agents.path]: agents.text, [access.path]: access.text, [gitmodules.path]: gitmodules.text, [settings.path]: settings.text },
   };
@@ -238,13 +283,33 @@ async function verifyScopes(root: string, registry: Registry): Promise<VerifiedS
   const moduleRoots = new Map<string, string>();
   const readable: Array<{ lexical: string; canonical: string }> = [];
   const pathChecks: NonNullable<ApplyPlan['pathChecks']> = [{ root, path: root, resolved: root }];
+  const checkKey = (anchor: string, target: string): string => `${comparable(anchor)}\u0000${comparable(target)}`;
+  const checkedPaths = new Set([checkKey(root, root)]);
+  const resolutions = new Map<string, Promise<string>>();
+  // A planning pass can see the same literal path in Read, Write and instructions.
+  // Reuse it only in this pass; transaction guards still resolve every retained check afresh.
+  const verify = (anchor: string, target: string): Promise<string> => {
+    const key = checkKey(anchor, target);
+    let resolution = resolutions.get(key);
+    if (!resolution) {
+      resolution = verifyContained(anchor, target);
+      resolutions.set(key, resolution);
+    }
+    return resolution;
+  };
+  const addCheck = (anchor: string, target: string, resolved: string): void => {
+    const key = checkKey(anchor, target);
+    if (checkedPaths.has(key)) return;
+    checkedPaths.add(key);
+    pathChecks.push({ root: anchor, path: target, resolved });
+  };
   const entries = Object.entries(registry.submodules);
   for (const [name, module] of entries) {
     try {
       const lexical = resolveContained(root, module.path);
-      const canonical = await verifyContained(root, lexical);
+      const canonical = await verify(root, lexical);
       moduleRoots.set(name, canonical);
-      pathChecks.push({ root, path: lexical, resolved: canonical });
+      addCheck(root, lexical, canonical);
     }
     catch (error) { if (module.enabled) throw error; }
   }
@@ -258,10 +323,10 @@ async function verifyScopes(root: string, registry: Registry): Promise<VerifiedS
       }
     }
     const lexicalRoot = resolveContained(root, module.path);
-    const scopes = module.restrict_paths ? [...module.read_paths, ...module.write_paths] : ['.'];
+    const scopes = module.restrict_paths ? [...new Set([...module.read_paths, ...module.write_paths].map(normalizeRelative))] : ['.'];
     for (const relative of scopes) {
       const lexical = resolveContained(lexicalRoot, relative);
-      const canonical = await verifyContained(lexicalRoot, lexical);
+      const canonical = await verify(lexicalRoot, lexical);
       rejectMetadataScope(root, lexical);
       rejectMetadataScope(root, canonical);
       for (const [otherName, otherRoot] of moduleRoots) {
@@ -270,24 +335,24 @@ async function verifyScopes(root: string, registry: Registry): Promise<VerifiedS
         }
       }
       readable.push({ lexical, canonical });
-      pathChecks.push({ root: lexicalRoot, path: lexical, resolved: canonical });
+      addCheck(lexicalRoot, lexical, canonical);
     }
   }
-  for (const relative of [...registry.shared_resources.read_paths, ...registry.shared_resources.write_paths]) {
+  for (const relative of new Set([...registry.shared_resources.read_paths, ...registry.shared_resources.write_paths].map(normalizeRelative))) {
     const lexical = resolveContained(root, relative);
-    const canonical = await verifyContained(root, lexical);
+    const canonical = await verify(root, lexical);
     rejectMetadataScope(root, lexical);
     rejectMetadataScope(root, canonical);
     for (const [name, moduleRoot] of moduleRoots) {
       if (overlaps(canonical, moduleRoot)) throw new Error(`A shared resource enters a registered project through a link: ${relative} / ${name}`);
     }
     readable.push({ lexical, canonical });
-    pathChecks.push({ root, path: lexical, resolved: canonical });
+    addCheck(root, lexical, canonical);
   }
   for (const [name, module] of entries) {
     if (!module.enabled || module.instruction_file === null) continue;
     const lexical = resolveContained(root, module.instruction_file);
-    const canonical = await verifyContained(root, lexical);
+    const canonical = await verify(root, lexical);
     const accessible = readable.some(scope => contained(scope.lexical, lexical) && contained(scope.canonical, canonical));
     if (!accessible) throw new Error(`${name}: the selected instruction resolves outside its readable scope.`);
     let info;
@@ -297,7 +362,7 @@ async function verifyScopes(root: string, registry: Registry): Promise<VerifiedS
       throw error;
     }
     if (!info.isFile()) throw new Error(`${name}: the selected instruction_file is not a file.`);
-    pathChecks.push({ root, path: lexical, resolved: canonical });
+    addCheck(root, lexical, canonical);
   }
   return { moduleRoots, readable, pathChecks };
 }
@@ -377,8 +442,8 @@ async function verifiedGitPaths(
   return { read: [...read], write: [...write], checks, pathChecks };
 }
 
-async function expectedConfiguration(state: WorkspaceState, relative: string): Promise<{ path: string; before: string | null }> {
-  const target = await configurationPath(state.root, relative);
+async function expectedConfiguration(state: WorkspaceState, relative: string, resolver: ContainedResolver): Promise<{ path: string; before: string | null }> {
+  const target = await configurationPath(state.root, relative, resolver);
   if (state.files && Object.hasOwn(state.files, target)) return { path: target, before: state.files[target] };
   const before = await readOptional(target);
   state.files ??= {};
@@ -397,9 +462,10 @@ export async function buildApplyPlan(state: WorkspaceState, options: ApplyOption
   const changes: FileChange[] = [];
   const checks: NonNullable<ApplyPlan['checks']> = [];
   const pathChecks = [...scopes.pathChecks];
-  const agents = await expectedConfiguration(state, agentsFile);
-  const access = await expectedConfiguration(state, ACCESS_POLICY_FILE);
-  const settings = await expectedConfiguration(state, settingsFile);
+  const configResolver = await createContainedResolver(state.root);
+  const agents = await expectedConfiguration(state, agentsFile, configResolver);
+  const access = await expectedConfiguration(state, ACCESS_POLICY_FILE, configResolver);
+  const settings = await expectedConfiguration(state, settingsFile, configResolver);
   const nextPolicy = state.reconfigurePolicy
     ? writeReconfiguredAccessFiles(agents.before ?? '', state.registry)
     : writeAccessFiles(agents.before ?? '', access.before, state.registry);
@@ -431,7 +497,7 @@ export async function buildApplyPlan(state: WorkspaceState, options: ApplyOption
   if (nextPolicy.access !== access.before) changes.push({ ...access, after: nextPolicy.access });
   if (nextPolicy.agents !== agents.before) changes.push({ ...agents, after: nextPolicy.agents });
   if (nextSettings !== settings.before && nextSettings !== null) changes.push({ ...settings, after: nextSettings });
-  const manifest = await expectedConfiguration(state, gitmodulesFile);
+  const manifest = await expectedConfiguration(state, gitmodulesFile, configResolver);
   checks.push({ path: manifest.path, expected: manifest.before });
   if (options.generateCodexProfile) {
     const discovered = parseGitmodules(manifest.before ?? '');
@@ -439,11 +505,12 @@ export async function buildApplyPlan(state: WorkspaceState, options: ApplyOption
     checks.push(...git.checks);
     pathChecks.push(...git.pathChecks);
     const profile = generateProfile(state.registry, {
-      root: state.root, profileName: options.profileName, allowNetwork: options.allowNetwork,
+      root: state.root, runtimeRoot: runtimeWorkspaceRoot(state.root, options.codexRuntime, options.codexWorkspaceRoot),
+      profileName: options.profileName, allowNetwork: options.allowNetwork,
       gitReadPaths: git.read, gitWritePaths: git.write,
     });
     warnings.push(...profile.warnings);
-    const config = await expectedConfiguration(state, codexFile);
+    const config = await expectedConfiguration(state, codexFile, configResolver);
     const nextConfig = updateCodexConfig(config.before ?? '', profile.text, options.profileName);
     if (nextConfig !== config.before) changes.push({ ...config, after: nextConfig });
     else checks.push({ path: config.path, expected: config.before });
@@ -454,6 +521,7 @@ export async function buildApplyPlan(state: WorkspaceState, options: ApplyOption
     }
   }
   // Every destination was checked, including parent junctions, before returning the plan.
+  await configResolver.assertUnchanged();
   await assertDirectoryIdentity(state.root, rootIdentity);
   return { changes, warnings: [...new Set(warnings)], checks, pathChecks, directoryChecks: [{ path: state.root, identity: rootIdentity }] };
 }

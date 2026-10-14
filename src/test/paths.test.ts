@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { test } from 'node:test';
-import { assertDirectoryIdentity, captureDirectoryIdentity, normalizeRelative, resolveContained, verifyContained } from '../core/paths';
+import { assertDirectoryIdentity, captureDirectoryIdentity, createContainedResolver, normalizeRelative, resolveContained, verifyContained } from '../core/paths';
 import { directoryLink, fixture } from './helpers';
 
 test('Literal relative paths normalize separators while rejecting traversal and patterns', () => {
@@ -61,4 +61,61 @@ test('Directory identity refuses links, non-directories and malformed expected t
   await assert.rejects(captureDirectoryIdentity(file), /ordinary directory/i);
   await assert.rejects(captureDirectoryIdentity('relative'), /absolute path/i);
   await assert.rejects(assertDirectoryIdentity(root, { dev: '0', ino: '1', birthtimeNs: '-1' }), /Invalid expected/i);
+});
+
+test('One operation reuses its root for missing descendants and rechecks it before returning', async (t) => {
+  const { root } = await fixture(t);
+  const realpath = fs.realpath.bind(fs);
+  let rootResolutions = 0;
+  t.mock.method(fs, 'realpath', async (...args: Parameters<typeof fs.realpath>) => {
+    if (String(args[0]) === root) rootResolutions++;
+    return realpath(...args);
+  });
+  const resolver = await createContainedResolver(root);
+  for (const relative of ['new/a.md', 'new/b.md', 'another/c.md']) {
+    assert.equal(await resolver.resolve(path.join(root, relative)), path.join(root, relative));
+  }
+  await resolver.assertUnchanged();
+  assert.equal(rootResolutions, 2, 'Resolving more missing files must not repeat root resolution');
+  await assert.rejects(resolver.resolve(path.join(root, '..', 'outside')), /outside/);
+});
+
+test('An operation never reuses a target link resolution after the link changes', async (t) => {
+  const { root, outside } = await fixture(t);
+  const actual = path.join(root, 'actual');
+  await fs.mkdir(actual);
+  const alias = path.join(root, 'alias');
+  await directoryLink(actual, alias);
+  const resolver = await createContainedResolver(root);
+  assert.equal(await resolver.resolve(path.join(alias, 'future.md')), path.join(actual, 'future.md'));
+  await fs.unlink(alias);
+  await directoryLink(outside, alias);
+  await assert.rejects(resolver.resolve(path.join(alias, 'future.md')), /symbolic link|junction/);
+  await resolver.assertUnchanged();
+});
+
+test('An operation refuses a replaced ordinary root and a retargeted root alias', async (t) => {
+  const { root, outside } = await fixture(t);
+  const resolver = await createContainedResolver(root);
+  await fs.rename(root, root + '-original');
+  await fs.mkdir(root);
+  await assert.rejects(resolver.assertUnchanged(), /root directory changed/i);
+  const alias = path.join(root, 'alias');
+  await directoryLink(root + '-original', alias);
+  const linked = await createContainedResolver(alias);
+  await fs.unlink(alias);
+  await directoryLink(outside, alias);
+  await assert.rejects(linked.assertUnchanged(), /directory changed through/i);
+});
+
+test('Existing-entry resolution keeps link containment and rejects missing entries without speculative targets', async (t) => {
+  const { root, outside } = await fixture(t);
+  const file = path.join(root, 'file.md');
+  await fs.writeFile(file, 'selected');
+  await directoryLink(outside, path.join(root, 'escape'));
+  const resolver = await createContainedResolver(root);
+  assert.equal(await resolver.resolveExisting(file), file);
+  await assert.rejects(resolver.resolveExisting(path.join(root, 'missing.md')), { code: 'ENOENT' });
+  await assert.rejects(resolver.resolveExisting(path.join(root, 'escape')), /symbolic link|junction/);
+  await resolver.assertUnchanged();
 });

@@ -55,10 +55,11 @@ export function resolveContained(root: string, relative: string): string {
 }
 
 /** Resolve a new file through its nearest existing parent, including junctions. */
-async function realpathWithMissingTail(target: string): Promise<string> {
+async function realpathWithMissingTail(target: string, anchor?: { path: string; canonical: string }): Promise<string> {
   let ancestor = target;
   const tail: string[] = [];
   for (;;) {
+    if (anchor && ancestor === anchor.path) { return path.resolve(anchor.canonical, ...tail); }
     try {
       // lstat separates a broken link from a nonexistent path; a broken link is unsafe.
       await fs.lstat(ancestor);
@@ -84,9 +85,48 @@ export async function verifyContained(root: string, target: string): Promise<str
   const base = path.resolve(root);
   const candidate = path.resolve(base, target);
   if (!isContained(base, candidate)) { throw new Error(`The path is outside its permitted root: ${target}`); }
-  const [realBase, realCandidate] = await Promise.all([realpathWithMissingTail(base), realpathWithMissingTail(candidate)]);
+  const [realBase, realCandidate] = candidate === base
+    ? await realpathWithMissingTail(base).then(resolved => [resolved, resolved])
+    : await Promise.all([realpathWithMissingTail(base), realpathWithMissingTail(candidate)]);
   if (!isContained(realBase, realCandidate)) {
     throw new Error(`A symbolic link or junction leaves its permitted root: ${target}`);
   }
   return realCandidate;
+}
+
+export interface ContainedResolver {
+  root: string;
+  canonicalRoot: string;
+  resolve(target: string): Promise<string>;
+  resolveExisting(target: string): Promise<string>;
+  assertUnchanged(): Promise<void>;
+}
+
+/** Reuse an anchor only within one operation, then recheck it before publishing results. */
+export async function createContainedResolver(root: string): Promise<ContainedResolver> {
+  const base = path.resolve(root);
+  const canonicalRoot = await realpathWithMissingTail(base);
+  const identity = await captureDirectoryIdentity(canonicalRoot);
+  const resolveTarget = async (target: string, existing: boolean): Promise<string> => {
+    const candidate = path.resolve(base, target);
+    if (!isContained(base, candidate)) { throw new Error(`The path is outside its permitted root: ${target}`); }
+    const canonical = existing ? await fs.realpath(candidate)
+      : await realpathWithMissingTail(candidate, { path: base, canonical: canonicalRoot });
+    if (!isContained(canonicalRoot, canonical)) {
+      throw new Error(`A symbolic link or junction leaves its permitted root: ${target}`);
+    }
+    return canonical;
+  };
+  return {
+    root: base, canonicalRoot,
+    resolve: target => resolveTarget(target, false),
+    resolveExisting: target => resolveTarget(target, true),
+    async assertUnchanged(): Promise<void> {
+      const current = await realpathWithMissingTail(base);
+      if (!isContained(canonicalRoot, current) || !isContained(current, canonicalRoot)) {
+        throw new Error(`The directory changed through a symbolic link or junction during this operation: ${root}`);
+      }
+      await assertDirectoryIdentity(canonicalRoot, identity);
+    },
+  };
 }

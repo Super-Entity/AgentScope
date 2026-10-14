@@ -2,7 +2,7 @@
   "name": "agentscope",
   "displayName": "AgentScope",
   "description": "Manage project visibility, agent instructions and Codex filesystem scopes from one workspace panel.",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "icon": "media/icon.png",
   "publisher": "SuperEntity",
   "license": "MIT",
@@ -238,6 +238,19 @@
           "default": "agentscope",
           "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
           "description": "Name of the generated Codex permission profile."
+        },
+        "agentscope.codexRuntime": {
+          "type": "string",
+          "enum": ["auto", "native", "wsl"],
+          "default": "auto",
+          "scope": "resource",
+          "description": "Path format for generated Codex permissions. Auto follows Codex's Run in Windows Subsystem for Linux setting; native uses the extension host's paths; wsl maps Windows drives to /mnt/<drive>."
+        },
+        "agentscope.codexWorkspaceRoot": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Optional absolute path of the selected workspace as seen by Codex, for example /mnt/d/MyApps. Use for custom WSL mount points or other runtime path mappings. Apply to regenerate the profile."
         },
         "agentscope.excludeFromSearch": {
           "type": "boolean",

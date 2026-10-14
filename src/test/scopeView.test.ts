@@ -184,6 +184,27 @@ test('The ready handshake sends the current model after the browser loads', asyn
   assert.ok(received.includes(ready));
 });
 
+test('Repeated refreshes in one turn publish the latest model once', async (t) => {
+  const ScopeView = loadProvider(t);
+  let model = initialModel();
+  let reads = 0;
+  const provider = new ScopeView(MockUri.file(path.join(process.cwd(), 'virtual-extension')), async () => undefined,
+    () => { reads++; return model; });
+  t.after(() => { provider.dispose(); });
+  const view = mockView();
+  await provider.resolveWebviewView(view);
+  const before = view.webview.posted.length;
+  const beforeReads = reads;
+  for (let index = 0; index < 100; index++) {
+    model = { ...initialModel(), message: `Latest change ${index}` };
+    provider.refresh();
+  }
+  await Promise.resolve();
+  assert.equal(view.webview.posted.length - before, 1);
+  assert.equal(reads - beforeReads, 1, 'Coalesce model construction as well as postMessage calls');
+  assert.deepEqual(view.webview.posted.at(-1), { type: 'state', state: model });
+});
+
 test('View disposal releases its message listener and detaches the response channel', async (t) => {
   const ScopeView = loadProvider(t);
   const provider = new ScopeView(MockUri.file(path.join(process.cwd(), 'virtual-extension')), async () => undefined, initialModel);

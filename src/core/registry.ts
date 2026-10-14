@@ -363,7 +363,7 @@ function inspectAccessSource(agentsText: string, accessText: string | null): Acc
       throw new Error(`Both AGENTS.md and ${ACCESS_POLICY_FILE} contain access registries. Review them and keep one authoritative policy before applying changes; existing content was preserved.`);
     }
   } else if (reference) {
-    throw new Error(`AGENTS.md references ${ACCESS_POLICY_FILE}, but that file is missing. Restore the policy before accessing project files or applying changes.`);
+    throw new Error(`AGENTS.md references ${ACCESS_POLICY_FILE}, but that file is missing. Use "Recover saved configuration" to restore saved access settings, or "Reconfigure access" to choose new scopes. Project access stays blocked until a valid policy is applied.`);
   }
   return { reference, legacy, mainFence, accessFence };
 }

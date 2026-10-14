@@ -4,7 +4,7 @@
 </h1>
 
 
-Manage Read and Write access, project instructions and Explorer visibility from a single VS Code panel. AgentScope works with local folders, Git submodules and multi-root workspaces.
+Manage Read and Write access, project instructions and Explorer visibility from a single VS Code panel. AgentScope works with local folders, Git submodules and multi-root workspaces on Windows, macOS and Linux, including VS Code running in WSL.
 
 ## Features
 
@@ -31,19 +31,23 @@ VS Code 1.95 or later is required. To update a VSIX installation, download a new
 You can also install from the folder containing the downloaded package with VS Code's CLI:
 
 ```sh
-code --install-extension agentscope-0.7.4.vsix
+code --install-extension agentscope-0.7.5.vsix
 ```
 
 ## Getting started
 
-1. Open a local workspace and select AgentScope in the Activity Bar. In a multi-root workspace, choose the folder to configure.
-2. Use **Refresh** to discover submodules, or **Add folder** to register a project. New projects start disabled. A workspace without registrations starts with its own root as a disabled project.
+1. Open a local workspace and select AgentScope in the Activity Bar. In a multi-root workspace, use **Select workspace** to choose the folder to configure.
+2. A new container workspace, such as a folder holding several apps, lists its immediate ordinary folders as disabled projects. Git submodules are discovered when `.gitmodules` exists. An individual Git repository or a folder with a project manifest starts with its own disabled root instead. Use **Add folder** to register one or more other workspace folders; Git is optional.
 3. Expand a project and check **Read** or **Write** for the paths it needs. A folder selection includes descendants; a mixed checkbox means only some paths are selected. Write also allows Read.
 4. Use **Workspace files** for supporting files outside registered projects. Its parent checkboxes select all currently available resources. Use **Hide/Show** to change visibility separately.
 5. Open **Preview**, choose a changed configuration file, and review the comparison. The current file is on the left; the proposed version is on the right.
 6. Select **Apply** to save the draft. Start a new agent session to load changes to its instructions or permission profile.
 
 Hover over toolbar icons for their labels. Folder arrows expand individual rows; **Collapse all** folds the tree without changing selections.
+
+For example, opening `MyApps` with `frontend/`, `backend/` and `docs/` lets you choose access for each folder independently. Opening a single project lets you expand its root and choose `src/`, `tests/` or individual files. Existing saved project registrations and access choices are preserved when you refresh.
+
+Installation and automatic refresh leave workspace files untouched. Background configuration errors appear in the panel without popups. Applying access settings, reconfiguring or recovering a policy is your choice. Multi-root workspaces keep separate settings for each selected folder.
 
 ## How selections work
 
@@ -77,7 +81,7 @@ Use **Presets → Save preset…** to name and save your current choices. **Acti
 
 AgentScope also keeps the last complete, valid policy pair in local VS Code extension storage. **More → Recover saved configuration** restores that pair after either policy file is deleted or damaged. Recovery replaces the files with the saved version and keeps their prior contents available through Restore.
 
-To choose permissions again, use **Reconfigure access** beside a configuration error or in More. It starts a draft with projects disabled and no Read/Write grants. Select the desired paths and Apply; existing `AGENTS.md` instructions are retained.
+If a linked `.agentscope/access.md` is missing or damaged, the panel keeps the selected workspace and shows the error. **Recover saved configuration**, when available, restores the last valid policy; it is also available beside the error. To choose permissions again, use **Reconfigure access** beside the error or in More. It starts a draft with projects disabled and no Read/Write grants. Select the desired paths and Apply; existing `AGENTS.md` instructions are retained. Neither action runs automatically.
 
 Recovery is local to this VS Code installation and workspace path. Keep important configuration files in version control or a separate backup. Errors in unrelated editor settings still need to be repaired before Apply.
 
@@ -89,10 +93,16 @@ Search for `agentscope` in VS Code Settings.
 | --- | --- | --- |
 | `generateCodexProfile` | `true` | Generate a named Codex permission profile |
 | `profileName` | `agentscope` | Profile name |
+| `codexRuntime` | `auto` | Generate paths for the native OS or WSL; Auto follows Codex's WSL setting |
+| `codexWorkspaceRoot` | empty | Optional absolute workspace path inside the Codex runtime, for custom drive mounts |
 | `excludeFromSearch` | `true` | Apply visibility choices to Search as well as Explorer |
 | `allowCommandNetwork` | `false` | Request command network access in the generated profile |
 
 Disable profile generation to manage policies and visibility without changing Codex configuration. Network settings concern local commands, not separate browsing or connector tools.
+
+Native Codex sessions keep the selected workspace's Windows, macOS or Linux paths. A VS Code extension running inside WSL already uses Linux paths; Windows VS Code can map the same workspace to its WSL location as described below.
+
+When VS Code runs on Windows and Codex runs in WSL, the profile needs Linux paths such as `/mnt/d/MyApps/.agentscope/access.md`. Auto detects `chatgpt.runCodexInWindowsSubsystemForLinux`; select `wsl` or `native` if needed. For a custom WSL mount, set `codexWorkspaceRoot` to the selected folder's Linux path. After changing the runtime or updating AgentScope, use **Preview → Apply** to regenerate its managed profile, then start a new Codex session.
 
 ## Access boundaries
 
@@ -105,6 +115,10 @@ Folder grants cover descendants without inspecting every nested link or metadata
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) to build, test or contribute to AgentScope.
+
+The GitHub Actions workflow runs the test suite and builds the VSIX on Windows, macOS and Linux. WSL path translation also has dedicated unit tests.
+
+Webview performance tests count element creation, listener bindings and table changes alongside access and keyboard behavior. Repeated states reuse existing rows; loading one folder adds its children while keeping other rows and controls. Sidebar refreshes in the same turn publish the latest model once.
 
 ## License
 

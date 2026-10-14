@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { test } from 'node:test';
-import { listProjectChildren } from '../browse';
+import { inspectProjectEntry, listProjectChildren } from '../browse';
 import { directoryLink, fixture } from './helpers';
 
 test('Browsing reads one directory at a time and never reads file contents', async (t) => {
@@ -96,4 +96,64 @@ test('Missing directories, regular-file expansion and traversal are reported', a
   await assert.rejects(listProjectChildren(root, 'project', 'missing'));
   await assert.rejects(listProjectChildren(root, 'project', 'file.md'));
   await assert.rejects(listProjectChildren(root, '../outside'));
+});
+
+
+test('Project expansion resolves anchors once per operation and bounds concurrent child checks', async (t) => {
+  const { root } = await fixture(t);
+  const moduleRoot = path.join(root, 'project');
+  await fs.mkdir(moduleRoot);
+  await Promise.all(Array.from({ length: 48 }, (_, index) => fs.writeFile(path.join(moduleRoot, `file-${index}.md`), 'leaf')));
+  const realpath = fs.realpath.bind(fs);
+  const resolved: string[] = [];
+  let active = 0;
+  let maximum = 0;
+  t.mock.method(fs, 'realpath', async (...args: Parameters<typeof fs.realpath>) => {
+    resolved.push(String(args[0]));
+    active++; maximum = Math.max(maximum, active);
+    try { await new Promise<void>(resolve => setImmediate(resolve)); return await realpath(...args); }
+    finally { active--; }
+  });
+  assert.equal((await listProjectChildren(root, 'project')).length, 48);
+  assert.ok(resolved.filter(target => target === root).length <= 3, 'The workspace anchor must not be resolved for every child');
+  assert.ok(resolved.filter(target => target === moduleRoot).length <= 4, 'The project anchor must not be resolved for every child');
+  assert.ok(maximum <= 32, `Child checks exceeded the filesystem concurrency limit: ${maximum}`);
+});
+
+test('Direct project entry validation checks current type and links without enumerating siblings', async (t) => {
+  const { root, outside } = await fixture(t);
+  const moduleRoot = path.join(root, 'project');
+  await fs.mkdir(path.join(moduleRoot, '.git'), { recursive: true });
+  await fs.writeFile(path.join(moduleRoot, 'leaf.md'), 'leaf');
+  await directoryLink(outside, path.join(moduleRoot, 'escape'));
+  await directoryLink(path.join(moduleRoot, '.git'), path.join(moduleRoot, 'metadata-alias'));
+  t.mock.method(fs, 'readdir', async () => { throw new Error('A clicked entry must not enumerate its siblings'); });
+  assert.deepEqual(await inspectProjectEntry(root, 'project', 'leaf.md'), { relative: 'leaf.md', directory: false });
+  await fs.unlink(path.join(moduleRoot, 'leaf.md'));
+  await fs.mkdir(path.join(moduleRoot, 'leaf.md'));
+  assert.deepEqual(await inspectProjectEntry(root, 'project', 'leaf.md'), { relative: 'leaf.md', directory: true });
+  await assert.rejects(inspectProjectEntry(root, 'project', 'missing.md'), /no longer exists.*refresh/i);
+  await assert.rejects(inspectProjectEntry(root, 'project', 'escape'), /symbolic link|junction|permitted root/i);
+  await assert.rejects(inspectProjectEntry(root, 'project', 'metadata-alias'), /Git metadata/i);
+});
+
+test('Replacing the project directory during expansion rejects results from the old operation anchor', async (t) => {
+  const { root } = await fixture(t);
+  const moduleRoot = path.join(root, 'project');
+  await fs.mkdir(moduleRoot);
+  await fs.writeFile(path.join(moduleRoot, 'leaf.md'), 'original');
+  const readdir = fs.readdir.bind(fs);
+  let replaced = false;
+  t.mock.method(fs, 'readdir', async (...args: Parameters<typeof fs.readdir>) => {
+    const entries = await readdir(...args);
+    if (String(args[0]) === moduleRoot && !replaced) {
+      replaced = true;
+      await fs.rename(moduleRoot, moduleRoot + '-old');
+      await fs.mkdir(moduleRoot);
+      await fs.writeFile(path.join(moduleRoot, 'leaf.md'), 'replacement');
+    }
+    return entries;
+  });
+  await assert.rejects(listProjectChildren(root, 'project'), /directory changed.*refresh/i);
+  assert.equal(replaced, true);
 });
