@@ -92,17 +92,39 @@ test('Scope webview enables scripts with media-only resources and no command URI
   assert.deepEqual(view.webview.options.localResourceRoots?.map(uri => uri.fsPath), [path.join(extensionUri.fsPath, 'media')]);
 });
 
-test('Scope menu offers scoped chat controls and no instruction-policy editors', async (t) => {
+test('The main page offers a visible chat button and keeps preset controls in their menu', async (t) => {
   const ScopeView = loadProvider(t);
   const provider = new ScopeView(MockUri.file(path.join(process.cwd(), 'virtual-extension')), async () => undefined, initialModel);
   t.after(() => { provider.dispose(); });
   const view = mockView();
   await provider.resolveWebviewView(view);
-  assert.match(view.webview.html, /data-command="newChat"/);
+  const html = view.webview.html;
+  assert.equal((html.match(/data-command="newChat"/g) ?? []).length, 1);
+  assert.match(html, /<\/header>\s*<button id="new-codex-chat" class="new-chat primary" data-command="newChat">New Codex chat<\/button>/);
+  const presetMenu = html.match(/<details class="more presets">([\s\S]*?)<\/details>/)?.[1];
+  assert.ok(presetMenu);
+  assert.doesNotMatch(presetMenu, /data-command="newChat"/);
+  assert.match(presetMenu, /data-command="toggleNewChatPresetPrompt"/);
+  assert.match(presetMenu, /data-command="updatePreset">Update preset…/);
+  assert.match(presetMenu, /Prompt for preset with Ctrl\+N/);
   assert.match(view.webview.html, /data-command="toggleNewChatPresetPrompt"/);
   assert.match(view.webview.html, /data-command="openConfiguration"/);
   assert.doesNotMatch(view.webview.html, /data-command="(?:openAgents|openAccess)"/);
   assert.doesNotMatch(view.webview.html, /Restore the last valid AGENTS\.md/);
+});
+
+test('Sandbox details are collapsed below the permission table', async (t) => {
+  const ScopeView = loadProvider(t);
+  const provider = new ScopeView(MockUri.file(path.join(process.cwd(), 'virtual-extension')), async () => undefined, initialModel);
+  t.after(() => { provider.dispose(); });
+  const view = mockView();
+  await provider.resolveWebviewView(view);
+  const html = view.webview.html;
+  const details = html.match(/<details id="sandbox-details"[^>]*>([\s\S]*?)<\/details>/);
+  assert.ok(details);
+  assert.match(details[0], /^<details id="sandbox-details" class="sandbox-details" hidden>/);
+  assert.match(details[1], /<summary>Sandbox details<\/summary>\s*<p id="scope-notice"><\/p>/);
+  assert.ok(html.indexOf('</table>') < html.indexOf('<details id="sandbox-details"'));
 });
 
 test('Scope HTML uses a fresh nonce CSP, external webview assets and a default deny policy', async (t) => {

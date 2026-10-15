@@ -131,9 +131,9 @@ export class ScopeView implements vscode.WebviewViewProvider, vscode.Disposable 
       <details class="more presets">
         <summary class="icon-button" title="Manage saved workspace presets" aria-label="Manage saved workspace presets">${icon('<path d="M6 3h12v18l-6-4-6 4Z"/>')}<span class="sr-only">Presets</span></summary>
         <div class="more-actions">
-          <button data-command="newChat">New Codex chat…</button>
-          <button data-command="toggleNewChatPresetPrompt" id="new-chat-preset-prompt" role="menuitemcheckbox" aria-checked="false">Prompt for preset before new chat</button>
+          <button data-command="toggleNewChatPresetPrompt" id="new-chat-preset-prompt" role="menuitemcheckbox" aria-checked="false">Prompt for preset with Ctrl+N</button>
           <button data-command="savePreset">Save preset…</button>
+          <button data-command="updatePreset">Update preset…</button>
           <button data-command="activatePreset">Activate preset…</button>
           <button data-command="deletePreset">Delete preset…</button>
         </div>
@@ -151,6 +151,8 @@ export class ScopeView implements vscode.WebviewViewProvider, vscode.Disposable 
       </details>
     </div>
   </header>
+  <button id="new-codex-chat" class="new-chat primary" data-command="newChat">New Codex chat</button>
+  <p class="chat-help">Choose a preset, then select it in Codex Permissions.</p>
   <p id="status" role="status" aria-live="polite">Loading workspace…</p>
   <p id="preset" class="preset-status" role="status" aria-live="polite" hidden></p>
   <p id="notice" class="notice" hidden></p>
@@ -161,6 +163,10 @@ export class ScopeView implements vscode.WebviewViewProvider, vscode.Disposable 
       <tbody id="rows"></tbody>
     </table>
   </div>
+  <details id="sandbox-details" class="sandbox-details" hidden>
+    <summary>Sandbox details</summary>
+    <p id="scope-notice"></p>
+  </details>
   <p class="help">Ordinary folders and Git submodules use the same controls. Folder checks include descendants. Write also permits Read. Changes stay in the draft until Apply.</p>
   <script nonce="${nonce}" src="${script}"></script>
 </body>

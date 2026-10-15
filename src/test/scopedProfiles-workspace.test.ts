@@ -63,7 +63,7 @@ test('Legacy migration detaches generated instructions and no longer reads a sid
   assert.deepEqual((await buildApplyPlan(await loadWorkspace(root), options)).changes, []);
 });
 
-test('Saved presets export isolated versioned profiles while preserving the default and earlier revisions', async t => {
+test('Saved presets use readable independent profiles and update only the selected preset definition', async t => {
   const { root } = await fixture(t);
   const options: ApplyOptions = { generateCodexProfile: true, profileName: 'agentscope', excludeFromSearch: true, allowNetwork: false, codexFilesystemMode: 'strict' };
   const first = await initialize(root);
@@ -77,6 +77,8 @@ test('Saved presets export isolated versioned profiles while preserving the defa
   assert.equal(config.default_permissions, 'agentscope');
   const [a, b] = plan.exportedProfiles!;
   assert.notEqual(a.profileName, b.profileName);
+  assert.equal(a.profileName, 'First - AgentScope');
+  assert.equal(b.profileName, 'Second - AgentScope');
   const firstFs = config.permissions[a.profileName].filesystem;
   const secondFs = config.permissions[b.profileName].filesystem;
   const target = (relative: string) => path.join(root, relative);
@@ -91,9 +93,10 @@ test('Saved presets export isolated versioned profiles while preserving the defa
   await writePreset(root, 'First', { registry: edited, hidden: {}, resourceHidden: {}, options });
   const updated = await buildApplyPlan(await loadWorkspace(root), options);
   const latest = updated.exportedProfiles!.find(profile => profile.presetName === 'First')!;
-  assert.notEqual(latest.profileName, a.profileName);
-  assert.deepEqual(parsed(updated).permissions[a.profileName], config.permissions[a.profileName]);
+  assert.equal(latest.profileName, a.profileName);
+  assert.deepEqual(parsed(updated).permissions[b.profileName], config.permissions[b.profileName], 'Updating First leaves the independent Second preset unchanged');
   assert.equal(parsed(updated).permissions[latest.profileName].filesystem[target('project/drafts')], undefined);
+  assert.ok(updated.warnings.some(warning => /Updating this named profile/.test(warning)));
 });
 
 test('Verified MXC pins its backend and Auto generates strict native Windows profiles for every preset', async t => {

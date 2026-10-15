@@ -198,8 +198,22 @@ test('Invalid filesystem modes fail closed during profile generation', async (t)
 
 test('Profile generation rejects invalid names and Git metadata outside the root', async (t) => {
   const { root, outside } = await fixture(t);
-  assert.throws(() => generateProfile(registry(), { root, profileName: 'bad.name', allowNetwork: false }), /profile name/);
+  for (const profileName of ['', ' outer ', 'bad\nname', ':reserved', '__proto__']) {
+    assert.throws(() => generateProfile(registry(), { root, profileName, allowNetwork: false }), /profile name/);
+  }
   assert.throws(() => generateProfile(registry(), { root, profileName: 'agentscope', allowNetwork: false, gitWritePaths: [outside] }), /Git metadata/);
+});
+
+test('Quoted profile names preserve Unicode, spaces and punctuation as a single TOML key', async (t) => {
+  const { root } = await fixture(t);
+  const profileName = 'پروژه "اول".draft - AgentScope';
+  const generated = generateProfile(registry(), { root, profileName, allowNetwork: false }).text;
+  const updated = updateCodexConfig('model = "preserve"\n', generated, profileName);
+  const value = TOML.parse(updated) as any;
+  assert.equal(value.default_permissions, profileName);
+  assert.equal(value.permissions[profileName].network.enabled, false);
+  assert.equal(Object.keys(value.permissions).length, 1);
+  assert.equal(updateCodexConfig(updated, generated, profileName), updated);
 });
 
 test('Updating TOML keeps unrelated tables, comments and multiline strings', async (t) => {

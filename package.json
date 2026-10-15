@@ -2,7 +2,7 @@
   "name": "agentscope",
   "displayName": "AgentScope",
   "description": "Manage workspace visibility and independent Codex permission profiles for saved project scopes.",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "icon": "media/icon.png",
   "publisher": "SuperEntity",
   "license": "MIT",
@@ -166,13 +166,19 @@
       },
       {
         "command": "agentscope.toggleNewChatPresetPrompt",
-        "title": "Prompt for a preset before new AgentScope chats",
+        "title": "Prompt for a preset with Ctrl+N",
         "category": "AgentScope",
         "toggled": "config.agentscope.promptPresetForNewChat"
       },
       {
         "command": "agentscope.savePreset",
         "title": "Save preset",
+        "category": "AgentScope",
+        "icon": "$(save)"
+      },
+      {
+        "command": "agentscope.updatePreset",
+        "title": "Update preset",
         "category": "AgentScope",
         "icon": "$(save)"
       },
@@ -248,7 +254,7 @@
           "type": "boolean",
           "default": false,
           "scope": "resource",
-          "description": "Show saved presets before AgentScope: New Codex chat and Codex's Ctrl+N shortcut. Select the matching permission profile in Codex before sending. Codex's internal + button cannot be intercepted by external extensions."
+          "description": "Route Codex's Ctrl+N shortcut through the preset picker. AgentScope: New Codex chat always shows the picker. Select the matching permission profile in Codex before sending; its internal + button cannot be intercepted by external extensions."
         },
         "agentscope.codexWindowsSandbox": {
           "type": "string",

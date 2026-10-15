@@ -22,7 +22,7 @@ Install [AgentScope from the VS Code Marketplace](https://marketplace.visualstud
 Alternatively, download a `.vsix` from [GitHub Releases](https://github.com/Super-Entity/AgentScope/releases), then run **Extensions: Install from VSIX...** in VS Code. You do not need Node.js or npm to use the extension. VS Code 1.95 or later is required.
 
 ```sh
-code --install-extension agentscope-0.8.0.vsix
+code --install-extension agentscope-0.8.1.vsix
 ```
 
 ## Getting started
@@ -32,19 +32,19 @@ code --install-extension agentscope-0.8.0.vsix
 3. Expand a project and check **Read** or **Write** for the paths it needs. A folder includes its descendants; a mixed checkbox means only some paths are selected. Write also allows Read.
 4. Use **Workspace files** for supporting files outside registered projects. Use **Hide/Show** to change visibility separately.
 5. Save useful selections with **Presets → Save preset...**. Use **Preview** to review the proposed configuration, then **Apply** to publish it.
-6. In a new Codex chat, open the permissions menu and choose the current generated entry for the desired preset before sending a message.
+6. Click **New Codex chat** on the AgentScope panel and choose a saved preset. In the opened Codex chat, select its **Preset name - AgentScope** entry in Permissions before sending a message.
 
 Installation, refresh and checkbox changes leave workspace configuration untouched. Access and visibility changes remain a draft until Apply; Save preset stores its snapshot immediately. Background configuration errors appear in the panel. Each selected folder in a multi-root workspace has its own configuration.
 
 ## Presets and individual chats
 
-Apply exports saved presets to separate entries in `.codex/config.toml`. Codex's native permissions menu displays labels such as **AgentScope: Review (revision)**, so two chats can select different project scopes without switching a shared instruction file. Selecting a profile applies to that chat; saving an AgentScope preset alone does not activate it in a running chat.
+Apply exports saved presets to separate entries in `.codex/config.toml`. Codex's native permissions menu displays short names such as **Review - AgentScope**, so two chats can select different project scopes without switching a shared instruction file. Selecting a profile applies to that chat; saving an AgentScope preset alone does not activate it in a running chat.
 
-Exported preset identifiers include a version derived from their effective permissions and runtime. Changing a preset publishes a new identifier and retains the previous profile, allowing chats already using that identifier to keep it. Deleting a saved preset also retains its exported profiles. Older versions can remain visible in Codex's menu; choose the current exported profile for a new chat.
+Each preset has one readable profile name without hashes or revision numbers. **Update preset...** saves the current editor selections over an existing preset after a Replace confirmation; other presets keep their snapshots. Use Apply to publish the update. Updating a preset updates that named profile, so chats using the same preset can receive its new permissions when Codex reloads configuration. Use separate presets when chats need independently maintained scopes.
 
-Retained identifiers preserve profile definitions; `windows.sandbox` remains a workspace-wide backend setting. After loading configuration that switches from MXC to a legacy backend, an older strict MXC profile may fail to start. Keep MXC selected for those profiles or choose a profile generated for the current runtime and backend.
+Apply migrates AgentScope's older hashed preset entries to these readable names. Existing chats using an older identifier must select the new entry in Codex Permissions. Unrelated user-created profiles are preserved. The `windows.sandbox` backend remains a workspace-wide setting; profiles must match the active runtime and backend.
 
-Run **AgentScope: New Codex chat** (`agentscope.newChat`) to open Codex. Enable `agentscope.promptPresetForNewChat` in Settings or toggle the preset prompt from the AgentScope menu to choose a saved preset first. This option also routes Ctrl+N through AgentScope while Codex's new-chat shortcut is active. Cancelling the picker opens no chat and publishes no changes.
+Use the **New Codex chat** button on the main AgentScope panel, or run **AgentScope: New Codex chat** (`agentscope.newChat`). This action always asks you to choose a saved preset before opening Codex. Enable `agentscope.promptPresetForNewChat` in Settings or the AgentScope menu to use the same preset flow for Ctrl+N while Codex's new-chat shortcut is active. Cancelling the picker opens no chat and publishes no changes.
 
 **After the chat opens, select the chosen profile in Codex's native permissions menu before sending.** Codex's public new-chat command does not accept a permission-profile argument. AgentScope cannot bind the selection automatically or intercept Codex's internal **+** button. Changing `default_permissions` is insufficient because Codex can remember a different menu selection. The picker and subsequent guidance make this manual step explicit.
 
@@ -98,7 +98,7 @@ When MXC cannot be verified, Auto uses Windows compatibility and explains the br
 
 Explicit **Strict** mode requires a compatible sandbox. **Windows-compatible** remains strict for POSIX runtime paths. Some legacy Windows backends cannot enforce writable descendants inside protected read-only paths or split write layouts; unsupported layouts need MXC or WSL2. AgentScope rejects known unsupported layouts without widening writes.
 
-After switching native/WSL runtimes or changing a runtime path, use **Preview → Apply**, then select the newly exported profile in a new session. Profiles contain runtime-specific paths; choose a version generated for the runtime actually running Codex.
+After switching native/WSL runtimes or changing a runtime path, use **Preview → Apply**, then select the exported profile in a new session. Profiles contain runtime-specific paths and must match the runtime actually running Codex.
 
 ## Settings
 
@@ -111,7 +111,7 @@ Search for `agentscope` in VS Code Settings.
 | `codexRuntime` | `auto` | Target the native OS or WSL runtime |
 | `codexWorkspaceRoot` | empty | Override the absolute workspace path inside the Codex runtime |
 | `codexFilesystemMode` | `auto` | Verify native Windows MXC, fall back to Windows compatibility, or choose an explicit mode |
-| `promptPresetForNewChat` | `false` | Show saved presets before AgentScope opens a chat; also route Codex's Ctrl+N through this flow |
+| `promptPresetForNewChat` | `false` | Route Codex's Ctrl+N through AgentScope's preset picker; the main New Codex chat button always shows the picker |
 | `excludeFromSearch` | `true` | Apply visibility choices to Search as well as Explorer |
 | `allowCommandNetwork` | `false` | Request network access for local commands |
 

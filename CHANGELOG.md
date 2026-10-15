@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.1
+
+- Show readable preset names such as `Review - AgentScope` in Codex Permissions, without hashes, revision suffixes or duplicate descriptions. Migrate AgentScope's older hashed entries on Apply; existing chats using an old identifier must select the new entry.
+- Put **New Codex chat** on the main AgentScope panel and always show its preset picker. Keep the optional setting for routing Codex's Ctrl+N through the same flow. Cancellation opens no chat and publishes no configuration.
+- Add **Update preset...** to replace an existing saved preset with the current editor selections after confirmation, preserving other presets. Apply updates that preset's named profile; chats sharing that preset may receive its updated scope when configuration reloads.
+- Move the detailed native Windows sandbox explanation into expandable details, while retaining backend and broad-read information in Preview and Apply.
+- Keep the native integration limit explicit: after AgentScope opens a chat, select the chosen profile in Codex Permissions. Codex's public new-chat command cannot bind a profile or intercept its internal **+** button.
+
 ## 0.8.0
 
 - Store AgentScope editor state in `.vscode/agentscope.json` and stop generating `AGENTS.md`, `.agentscope/access.md` and project instruction references. Import recognized legacy settings once; remove only canonical generated AGENTS blocks on Apply, preserving user prose and the sidecar backup.

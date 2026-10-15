@@ -5,6 +5,8 @@
   const status = document.getElementById('status');
   const preset = document.getElementById('preset');
   const notice = document.getElementById('notice');
+  const sandboxDetails = document.getElementById('sandbox-details');
+  const scopeNotice = document.getElementById('scope-notice');
   const configurationActions = document.getElementById('configuration-actions');
   const recoverSaved = document.getElementById('recover-saved');
   const workspace = document.getElementById('workspace');
@@ -335,10 +337,12 @@
     const presetPrompt = document.getElementById('new-chat-preset-prompt');
     if (presetPrompt) {
       presetPrompt.setAttribute('aria-checked', String(model.promptPresetForNewChat === true));
-      presetPrompt.textContent = `${model.promptPresetForNewChat ? '✓ ' : ''}Prompt for preset before new chat`;
+      presetPrompt.textContent = `${model.promptPresetForNewChat ? '✓ ' : ''}Prompt for preset with Ctrl+N`;
     }
+    scopeNotice.textContent = typeof model.scopeNotice === 'string' ? model.scopeNotice : '';
+    sandboxDetails.hidden = !scopeNotice.textContent;
+    if (sandboxDetails.hidden) sandboxDetails.open = false;
     const warnings = [];
-    if (model.scopeNotice) warnings.push(model.scopeNotice);
     if (!model.trusted) warnings.push('Restricted Mode: trust this workspace to change permissions.');
     if (!model.workspace) warnings.push('Open a local workspace folder to manage its permissions.');
     if (model.configurationError) warnings.push(model.trusted ? 'Use Reconfigure access to select permissions again, or Recover saved configuration when available.' : 'Trust this workspace to reconfigure or recover. Files repaired on disk are reloaded automatically.');

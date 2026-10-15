@@ -11,6 +11,8 @@ button.primary:hover, summary.primary:hover { background: var(--vscode-button-ho
 button:focus-visible, summary:focus-visible, input:focus-visible, tr:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
 .workspace { display: block; width: 100%; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 8px; background: transparent; color: var(--vscode-foreground); border-color: var(--vscode-panel-border); }
 .toolbar { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; width: 100%; min-width: 0; max-width: 100%; }
+.new-chat { display: block; width: 100%; margin-top: 10px; padding: 7px 10px; text-align: center; }
+.chat-help { margin: 5px 0 0; color: var(--vscode-descriptionForeground); line-height: 1.4; font-size: .9em; }
 .toolbar .icon-button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; flex: 0 0 28px; padding: 4px; border: 1px solid transparent; border-radius: 3px; cursor: pointer; }
 .toolbar-icon { display: block; width: 18px; height: 18px; flex: none; }
 .more { position: static; flex: 0 0 auto; }
@@ -30,6 +32,9 @@ button:focus-visible, summary:focus-visible, input:focus-visible, tr:focus-visib
 body.vscode-light .preset-status.is-active { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green, #168249)); }
 body.vscode-light .preset-status.is-draft { color: var(--vscode-editorWarning-foreground, #8a6100); }
 .notice { margin: 8px 0; padding: 8px; color: var(--vscode-editorWarning-foreground, var(--vscode-foreground)); border: 1px solid var(--vscode-editorWarning-border, var(--vscode-panel-border)); overflow-wrap: anywhere; }
+.sandbox-details { margin-top: 12px; color: var(--vscode-descriptionForeground); font-size: .92em; line-height: 1.45; }
+.sandbox-details > summary { width: fit-content; cursor: pointer; }
+.sandbox-details > p { margin: 6px 0 0; overflow-wrap: anywhere; }
 .table-wrap { width: 100%; min-width: 0; max-width: 100%; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; text-align: left; font-size: inherit; }
 thead { position: sticky; top: 0; z-index: 1; background: var(--vscode-sideBar-background); }

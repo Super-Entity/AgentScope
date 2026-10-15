@@ -800,17 +800,27 @@ export function activate(context: vscode.ExtensionContext): void {
     draft();
   }
 
-  async function savePreset(): Promise<void> {
+  async function savePreset(updateExisting = false): Promise<void> {
     trusted();
     const current = state();
     assertPresetSaved(current.root);
     writing = true; update();
     try {
-      const name = await vscode.window.showInputBox({ title: 'AgentScope: Save preset', prompt: 'Name this access and visibility configuration.',
-        value: selectedPreset ?? '', validateInput: value => !value.trim() || value.trim().length > 80 || /[\x00-\x1f\x7f]/.test(value) || ['__proto__', 'constructor', 'prototype'].includes(value.trim()) ? 'Use a name of 1–80 characters without control characters.' : undefined });
+      let name: string | undefined;
+      if (updateExisting) {
+        const store = await readPresets(current.root);
+        const names = Object.keys(store.presets).sort();
+        if (!names.length) throw new Error('No saved presets. Use Save preset first.');
+        name = await vscode.window.showQuickPick(names, { title: 'AgentScope: Update preset',
+          placeHolder: 'Replace this preset with the current access and visibility draft.' });
+      } else {
+        name = await vscode.window.showInputBox({ title: 'AgentScope: Save preset', prompt: 'Name this access and visibility configuration.',
+          value: selectedPreset ?? '', validateInput: value => !value.trim() || value.trim().length > 80 || /[\x00-\x1f\x7f]/.test(value) || ['__proto__', 'constructor', 'prototype'].includes(value.trim()) ? 'Use a name of 1–80 characters without control characters.' : undefined });
+      }
       if (!name?.trim()) return;
       await ensureWritableWorkspace(current);
       const existing = await readPresets(current.root);
+      if (updateExisting && !Object.hasOwn(existing.presets, name.trim())) throw new Error('The selected preset no longer exists. Choose it again.');
       if (Object.hasOwn(existing.presets, name.trim())) {
         const replace = await vscode.window.showWarningMessage(`Replace preset “${name.trim()}”?`, { modal: true }, 'Replace');
         if (replace !== 'Replace') return;
@@ -822,7 +832,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (current.files) delete current.files[resolveContained(current.root, '.vscode/agentscope-presets.json')];
       selectedPreset = name.trim();
       current.dirty = true;
-      vscode.window.showInformationMessage(`AgentScope: Preset “${selectedPreset}” saved. Apply saves any pending scope changes.`);
+      vscode.window.showInformationMessage(`AgentScope: Preset “${selectedPreset}” ${updateExisting ? 'updated' : 'saved'}. Apply publishes its permissions.`);
     } finally { finishWriting(); }
   }
 
@@ -907,10 +917,6 @@ export function activate(context: vscode.ExtensionContext): void {
     const current = state();
     startingChat = true; update();
     try {
-    const config = vscode.workspace.getConfiguration('agentscope', vscode.Uri.file(current.root));
-    if (!config.get<boolean>('promptPresetForNewChat', false)) {
-      await vscode.commands.executeCommand('chatgpt.newChat'); return;
-    }
     // The public Codex command ignores profile arguments. Never change a global
     // default and claim that the new conversation was bound to that profile.
     let prepared: ApplyPlan;
@@ -1018,7 +1024,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         if (message.target === 'resource') { throw new Error('Use a workspace resource action for this target.'); }
         const allowed = ['refresh', 'apply', 'preview', 'addFolder', 'selectWorkspace', 'configure',
-          'toggleVisibility', 'toggleAccess', 'sharedPaths', 'restore', 'recover', 'reconfigure', 'openConfiguration', 'openCodex', 'removeProject', 'savePreset', 'activatePreset', 'deletePreset', 'newChat', 'toggleNewChatPresetPrompt'];
+          'toggleVisibility', 'toggleAccess', 'sharedPaths', 'restore', 'recover', 'reconfigure', 'openConfiguration', 'openCodex', 'removeProject', 'savePreset', 'updatePreset', 'activatePreset', 'deletePreset', 'newChat', 'toggleNewChatPresetPrompt'];
         if (typeof message.command !== 'string' || !allowed.includes(message.command)) {
           throw new Error('Unknown scope panel command.');
         }
@@ -1132,7 +1138,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const actions: Record<string, (...args: any[]) => Promise<unknown>> = {
     refresh, selectWorkspace, addFolder, configure, preview: () => preview(), apply, restore, recover, reconfigure, sharedPaths,
-    savePreset, activatePreset, deletePreset: removePreset, newChat, toggleNewChatPresetPrompt,
+    savePreset: () => savePreset(), updatePreset: () => savePreset(true), activatePreset, deletePreset: removePreset, newChat, toggleNewChatPresetPrompt,
     toggleVisibility: (node?: ScopeNode) => changeProject(node, (current, name) => {
       if (current.registry.submodules[name].path === '.') throw new Error('The open workspace root cannot be hidden. Manage visibility for its child projects instead.');
       current.hidden[name] = !current.hidden[name];

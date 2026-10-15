@@ -24,6 +24,7 @@ function browser() {
     indeterminate = false;
     disabled = false;
     hidden = false;
+    open = false;
     tabIndex = -1;
     title = '';
     type = '';
@@ -86,7 +87,7 @@ function browser() {
     querySelector(selector: string): Element | null { return this.querySelectorAll(selector)[0] ?? null; }
   }
   const ids = new Map<string, Element>();
-  for (const id of ['rows', 'status', 'preset', 'notice', 'configuration-actions', 'recover-saved', 'workspace', 'collapse-all', 'permissions']) {
+  for (const id of ['rows', 'status', 'preset', 'notice', 'sandbox-details', 'scope-notice', 'configuration-actions', 'recover-saved', 'workspace', 'collapse-all', 'permissions']) {
     ids.set(id, new Element(id === 'rows' ? 'tbody' : id === 'collapse-all' ? 'button' : 'div'));
   }
   const body = ids.get('rows')!;
@@ -142,18 +143,37 @@ function fileRow(name: string, relative: string, directory = false) {
   return { name, relative, label: path.posix.basename(relative), directory, project: false, read: selection, write: selection };
 }
 
-test('The panel renders the active filesystem compatibility notice and removes it after a runtime change', () => {
+test('Sandbox information stays in collapsed details and disappears after a runtime change', () => {
   const ui = browser();
   const notice = ui.ids.get('notice')!;
+  const details = ui.ids.get('sandbox-details')!;
+  const scopeNotice = ui.ids.get('scope-notice')!;
   const state = ui.state([projectRow('app')], {
     scopeNotice: 'Windows compatibility: files outside selected paths, including disabled projects, remain readable.',
   });
   ui.send({ type: 'state', state });
-  assert.equal(notice.hidden, false);
-  assert.match(notice.textContent, /outside selected paths.*disabled projects.*readable/);
+  assert.equal(notice.hidden, true);
+  assert.equal(details.hidden, false);
+  assert.equal(details.open, false);
+  assert.match(scopeNotice.textContent, /outside selected paths.*disabled projects.*readable/);
+  details.open = true;
+  ui.send({ type: 'state', state });
+  assert.equal(details.open, true, 'Keep the user\'s expanded details open across refreshes');
   ui.send({ type: 'state', state: { ...state, scopeNotice: undefined } });
+  assert.equal(details.hidden, true);
+  assert.equal(details.open, false);
+  assert.equal(scopeNotice.textContent, '');
   assert.equal(notice.hidden, true);
   assert.equal(notice.textContent, '');
+});
+
+test('Workspace warnings remain visible separately from the sandbox details', () => {
+  const ui = browser();
+  ui.send({ type: 'state', state: ui.state([], { trusted: false, scopeNotice: 'Native Windows sandbox information.' }) });
+  assert.equal(ui.ids.get('notice')!.hidden, false);
+  assert.match(ui.ids.get('notice')!.textContent, /Restricted Mode/);
+  assert.doesNotMatch(ui.ids.get('notice')!.textContent, /Native Windows/);
+  assert.equal(ui.ids.get('scope-notice')!.textContent, 'Native Windows sandbox information.');
 });
 
 test('An unchanged 200-project state creates no new rows, listeners or table mutations', t => {

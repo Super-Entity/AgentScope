@@ -563,10 +563,50 @@ test('Preset replacement and deletion preserve other saved names and do not rewr
   for (const [file, original] of ui.originals) assert.equal(await ui.read(file), original);
 });
 
-test('Untrusted workspaces cannot save, activate or delete presets', async (t) => {
+test('Updating an existing preset requires replacement confirmation and preserves other names', async (t) => {
+  const ui = await activateInFixture(t);
+  const storePath = '.vscode/agentscope-presets.json';
+  ui.inputAnswers.push('First'); await ui.command('savePreset');
+  ui.inputAnswers.push('Second'); await ui.command('savePreset');
+  const before = await ui.read(storePath);
+  const previous = parseJsoncStrict(before, 'Preset store') as Record<string, any>;
+  await ui.toggle(await resourceRow(ui, 'README.md'), 'read', true);
+
+  ui.quickAnswers.push('First');
+  await ui.command('updatePreset');
+  assert.equal(await ui.read(storePath), before, 'Dismissing Replace must keep the saved preset unchanged');
+
+  ui.quickAnswers.push('First'); ui.warningAnswers.push('Replace');
+  await ui.command('updatePreset');
+  const updated = parseJsoncStrict(await ui.read(storePath), 'Preset store') as Record<string, any>;
+  assert.deepEqual(Object.keys(updated.presets).sort(), ['First', 'Second']);
+  assert.ok(updated.presets.First.registry.shared_resources.read_paths.includes('README.md'));
+  assert.deepEqual(updated.presets.Second, previous.presets.Second);
+  assert.equal(ui.state().preset, 'First');
+  assert.equal(ui.state().dirty, true, 'The updated snapshot still needs Apply to publish its profile');
+  assert.deepEqual(ui.errors, []);
+  for (const [file, original] of ui.originals) assert.equal(await ui.read(file), original);
+});
+
+test('Cancelling Update preset or returning an unavailable name does not create a preset', async (t) => {
+  const ui = await activateInFixture(t);
+  ui.inputAnswers.push('Existing'); await ui.nativeCommand('savePreset');
+  const before = await ui.read('.vscode/agentscope-presets.json');
+  await ui.nativeCommand('updatePreset');
+  assert.equal(await ui.read('.vscode/agentscope-presets.json'), before);
+  assert.deepEqual(ui.errors, []);
+
+  ui.quickAnswers.push('Missing'); ui.warningAnswers.push('Replace');
+  await ui.nativeCommand('updatePreset');
+  assert.equal(await ui.read('.vscode/agentscope-presets.json'), before);
+  assert.equal(ui.errors.length, 1);
+  assert.match(ui.errors[0], /preset.*(?:missing|unknown|available|changed|exist)|(?:unknown|missing).*preset/i);
+});
+
+test('Untrusted workspaces cannot save, update, activate or delete presets', async (t) => {
   const ui = await activateInFixture(t, false);
-  for (const action of ['savePreset', 'activatePreset', 'deletePreset']) await ui.command(action);
-  assert.equal(ui.errors.length, 3); assert.ok(ui.errors.every(error => /Trust the workspace/.test(error)));
+  for (const action of ['savePreset', 'updatePreset', 'activatePreset', 'deletePreset']) await ui.command(action);
+  assert.equal(ui.errors.length, 4); assert.ok(ui.errors.every(error => /Trust the workspace/.test(error)));
   await assert.rejects(fs.stat(path.join(ui.root, '.vscode', 'agentscope-presets.json')), { code: 'ENOENT' });
   assert.equal(ui.state().dirty, false);
 });
@@ -1722,7 +1762,7 @@ test('An unchanged Recovery preserves the previous Undo journal, explains the no
   assert.equal(ui.informationMessages.length, informationCount, 'A conflicting no-op must not report success');
 });
 
-test('Preset Save and Delete refuse dirty editors before dialogs and after their confirmations', async (t) => {
+test('Preset Save, Update and Delete refuse dirty editors before dialogs and after their confirmations', async (t) => {
   const ui = await activateInFixture(t);
   const target = path.join(ui.root, '.vscode', 'agentscope-presets.json');
   ui.inputAnswers.push('Existing');
@@ -1731,9 +1771,17 @@ test('Preset Save and Delete refuse dirty editors before dialogs and after their
   const editor = { isDirty: true, uri: MockUri.file(process.platform === 'win32' ? target.toUpperCase() : target), fileName: target };
   ui.textDocuments.push(editor);
   await ui.nativeCommand('savePreset');
+  await ui.nativeCommand('updatePreset');
   await ui.nativeCommand('deletePreset');
-  assert.equal(ui.errors.length, 2);
+  assert.equal(ui.errors.length, 3);
   assert.ok(ui.errors.every(error => /Save or discard.*agentscope-presets/i.test(error)));
+  assert.equal(await ui.read('.vscode/agentscope-presets.json'), before);
+
+  editor.isDirty = false;
+  ui.quickAnswers.push('Existing'); ui.warningAnswers.push('Replace');
+  ui.beforePresetConfirmation.push(async () => { editor.isDirty = true; });
+  await ui.nativeCommand('updatePreset');
+  assert.match(ui.errors.at(-1)!, /Save or discard/);
   assert.equal(await ui.read('.vscode/agentscope-presets.json'), before);
 
   editor.isDirty = false;
@@ -1750,7 +1798,7 @@ test('Preset Save and Delete refuse dirty editors before dialogs and after their
   await ui.nativeCommand('deletePreset');
   assert.match(ui.errors.at(-1)!, /Save or discard/);
   assert.equal(await ui.read('.vscode/agentscope-presets.json'), before);
-  assert.equal(ui.errors.length, 4);
+  assert.equal(ui.errors.length, 6);
 });
 
 test('File changes during preset input are reconciled after both saving and cancellation', async (t) => {
@@ -1988,14 +2036,29 @@ test('Visibility and enable toggles reuse the displayed resource frontier', asyn
   assert.deepEqual(ui.errors, []);
 });
 
-test('AgentScope new-chat prompt is optional and disabled by default', async (t) => {
+test('The dedicated New Codex chat action always offers saved presets with the shortcut option disabled', async (t) => {
   const ui = await activateInFixture(t);
+  ui.inputAnswers.push('Writing');
+  await ui.nativeCommand('savePreset');
+  assert.equal(ui.state().promptPresetForNewChat, false);
   await ui.nativeCommand('newChat');
   assert.deepEqual(ui.errors, []);
-  assert.equal(ui.executeCalls.filter(call => call.name === 'chatgpt.newChat').length, 1);
-  assert.equal(ui.quickPickPrompts.length, 0);
+  assert.equal(ui.executeCalls.filter(call => call.name === 'chatgpt.newChat').length, 0);
+  assert.equal(ui.quickPickPrompts.length, 1);
+  assert.deepEqual((ui.quickPickPrompts[0].items as Array<{ label: string }>).map(item => item.label), ['Writing']);
+  assert.match(ui.quickPickPrompts[0].options.title, /Preset for new Codex chat/);
   for (const [file, original] of ui.originals) assert.equal(await ui.read(file), original);
   await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
+});
+
+test('New Codex chat without a saved preset explains how to prepare one and opens no chat', async (t) => {
+  const ui = await activateInFixture(t);
+  await ui.nativeCommand('newChat');
+  assert.equal(ui.errors.length, 1);
+  assert.match(ui.errors[0], /Save a preset/i);
+  assert.equal(ui.executeCalls.filter(call => call.name === 'chatgpt.newChat').length, 0);
+  assert.equal(ui.confirmations.length, 0);
+  for (const [file, original] of ui.originals) assert.equal(await ui.read(file), original);
 });
 
 test('The preset-prompt menu toggle updates the selected workspace setting', async (t) => {
@@ -2028,7 +2091,7 @@ test('Choosing a chat preset publishes its profile then requires manual native s
   const ui = await activateInFixture(t);
   ui.inputAnswers.push('Writing');
   await ui.nativeCommand('savePreset');
-  ui.configuration.promptPresetForNewChat = true;
+  assert.equal(ui.state().promptPresetForNewChat, false);
   ui.quickAnswers.push((items: Array<{label: string}>) => items.find(item => item.label === 'Writing'));
   await ui.nativeCommand('newChat');
   assert.deepEqual(ui.errors, []);
@@ -2041,7 +2104,7 @@ test('Choosing a chat preset publishes its profile then requires manual native s
   assert.match(guidance, /Use workspace.*before sending.*select.*Writing.*Permissions/i);
   assert.match(guidance, /cannot select the workspace or profile automatically/i);
   const codex = TOML.parse(await ui.read('.codex/config.toml')) as Record<string, any>;
-  assert.ok(Object.values(codex.permissions).some((profile: any) => /Writing/.test(profile.description)));
+  assert.ok(codex.permissions['Writing - AgentScope'], 'The native menu must use the short preset name');
 });
 
 test('Cancelling profile publication prevents opening the scoped chat', async (t) => {
