@@ -22,7 +22,7 @@ Install [AgentScope from the VS Code Marketplace](https://marketplace.visualstud
 Alternatively, download a `.vsix` from [GitHub Releases](https://github.com/Super-Entity/AgentScope/releases), then run **Extensions: Install from VSIX...** in VS Code. You do not need Node.js or npm to use the extension. VS Code 1.95 or later is required.
 
 ```sh
-code --install-extension agentscope-0.8.2.vsix
+code --install-extension agentscope-0.8.3.vsix
 ```
 
 ## Getting started

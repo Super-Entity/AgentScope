@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.3
+
+- Make the logo's horizontal and vertical connectors equal in length in both SVG and PNG icons, keeping the design centered.
+
 ## 0.8.2
 
 - Change project license to AGPL-3.0-only.
