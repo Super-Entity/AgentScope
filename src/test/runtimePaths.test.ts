@@ -1,6 +1,37 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CodexRuntime, profileTarget, runtimeWorkspaceRoot } from '../core/runtimePaths';
+import { CodexFilesystemMode, CodexRuntime, profileTarget, resolveFilesystemMode, runtimeWorkspaceRoot } from '../core/runtimePaths';
+
+test('Filesystem modes follow the effective runtime path rather than the extension host', () => {
+  for (const root of ['D:\\MyApps', 'd:/My Apps', '\\\\server\\share\\MyApps']) {
+    assert.equal(resolveFilesystemMode(root), 'windows-compatible');
+    assert.equal(resolveFilesystemMode(root, 'windows-compatible'), 'windows-compatible');
+    assert.equal(resolveFilesystemMode(root, 'strict'), 'strict');
+  }
+  for (const root of ['/mnt/d/MyApps', '/home/user/MyApps', '/Users/dev/MyApps']) {
+    assert.equal(resolveFilesystemMode(root), 'strict');
+    assert.equal(resolveFilesystemMode(root, 'windows-compatible'), 'strict', 'Portable compatibility presets must keep POSIX reads restricted');
+    assert.equal(resolveFilesystemMode(root, 'strict'), 'strict');
+  }
+});
+
+test('Hybrid runtime mappings choose the filesystem mode after mapping the workspace', () => {
+  const native = runtimeWorkspaceRoot('D:\\MyApps', 'auto', '', false);
+  const wsl = runtimeWorkspaceRoot('D:\\MyApps', 'auto', '', true);
+  assert.equal(resolveFilesystemMode(native), 'windows-compatible');
+  assert.equal(resolveFilesystemMode(wsl), 'strict');
+  assert.equal(resolveFilesystemMode(runtimeWorkspaceRoot('/work/MyApps', 'native', 'E:\\MyApps')), 'windows-compatible');
+  assert.equal(resolveFilesystemMode(runtimeWorkspaceRoot('D:\\MyApps', 'wsl', '/custom/MyApps')), 'strict');
+});
+
+test('Filesystem mode resolution rejects malformed modes and runtime paths', () => {
+  for (const mode of ['unknown', '', null, true, {}]) {
+    assert.throws(() => resolveFilesystemMode('D:\\MyApps', mode as CodexFilesystemMode), /filesystem mode/);
+  }
+  for (const root of ['relative', '/work/../MyApps', 'D:relative', ':workspace_roots']) {
+    assert.throws(() => resolveFilesystemMode(root));
+  }
+});
 
 test('Native paths follow their own platform syntax regardless of the extension host', () => {
   assert.equal(runtimeWorkspaceRoot('D:\\MyApps\\'), 'D:\\MyApps');

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.6
+
+- Generate Windows-compatible filesystem profiles for native Windows by default, avoiding the legacy sandbox startup error requiring effective `:root` read access. Keep selected writes precise and disclose broad reads in the panel, generated profile and Apply confirmation.
+- Add Auto, Strict and Windows-compatible filesystem modes. Resolve compatibility from the effective Codex runtime path, preserving strict profiles for WSL, Linux and macOS, including mixed host/runtime setups.
+- Inherit newly added settings when activating older presets, refresh draft notices when runtime settings change, and reject configuration changes made during Apply confirmation.
+- Omit redundant read entries in Windows compatibility mode and reject unsupported read-only carveouts with writable descendants without widening writes.
+
 ## 0.7.5
 
 - Discover ordinary child folders in new container workspaces alongside Git submodules, with disabled access defaults and preserved saved registrations.

@@ -1,3 +1,5 @@
+import type { CodexFilesystemMode } from './core/runtimePaths';
+
 export interface ModuleConfig {
   path: string;
   enabled: boolean;
@@ -20,6 +22,7 @@ export interface ProfileOptions {
   root: string;
   /** The same selected workspace as seen by the Codex runtime (for example WSL). */
   runtimeRoot?: string;
+  filesystemMode?: CodexFilesystemMode;
   profileName: string;
   allowNetwork: boolean;
   /** Exact Git paths already resolved and verified to belong to enabled modules. */
@@ -27,13 +30,15 @@ export interface ProfileOptions {
   gitWritePaths?: string[];
 }
 
-export interface ProfileOutput { text: string; warnings: string[] }
+export interface ProfileOutput { text: string; warnings: string[]; broadReadAccess: boolean }
 export interface FileChange { path: string; before: string | null; after: string }
 /** Stable directory identity; timestamps changed by child writes are intentionally excluded. */
 export interface DirectoryIdentity { dev: string; ino: string; birthtimeNs: string }
 export interface ApplyPlan {
   changes: FileChange[];
   warnings: string[];
+  /** Windows compatibility allows OS-level reads outside the selected paths. */
+  broadReadAccess?: boolean;
   /** Read-only inputs whose contents must still match at apply time. */
   checks?: Array<{ path: string; expected: string | null }>;
   /** Scope targets rechecked before writing configuration. */

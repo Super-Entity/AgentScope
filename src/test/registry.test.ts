@@ -56,7 +56,7 @@ test('A continued disabled project remains excluded from Workspace files Write s
   state.registry.shared_resources = await toggleWorkspaceSelection(root, state.registry, 'write', true);
   assert.ok(state.registry.shared_resources.write_paths.includes('secret'));
   assert.ok(!state.registry.shared_resources.write_paths.includes('secretprojects'));
-  const plan = await buildApplyPlan(state, { generateCodexProfile: true, excludeFromSearch: true, profileName: 'agentscope', allowNetwork: false });
+  const plan = await buildApplyPlan(state, { generateCodexProfile: true, excludeFromSearch: true, profileName: 'agentscope', allowNetwork: false, codexFilesystemMode: 'strict' });
   const config = plan.changes.find(change => change.path === path.join(root, '.codex', 'config.toml'))!;
   const parsed = TOML.parse(config.after) as any;
   assert.equal(parsed.permissions.agentscope.filesystem[path.join(root, 'secretprojects')], 'deny');
@@ -91,7 +91,7 @@ test('Literal prototype metadata cannot enable a project or generate a broad wri
   assert.deepEqual(read.submodules.project.read_paths, []);
   assert.deepEqual(read.submodules.project.write_paths, []);
   const root = path.resolve('prototype-registry-fixture');
-  const profile = TOML.parse(generateProfile(read, { root, profileName: 'agentscope', allowNetwork: false }).text) as any;
+  const profile = TOML.parse(generateProfile(read, { root, profileName: 'agentscope', allowNetwork: false, filesystemMode: 'strict' }).text) as any;
   assert.equal(profile.permissions.agentscope.filesystem[path.join(root, 'project')], 'deny');
 });
 

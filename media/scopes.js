@@ -333,6 +333,7 @@
     preset.classList.toggle('is-active', !preset.hidden && !model.dirty);
     preset.classList.toggle('is-draft', !preset.hidden && model.dirty);
     const warnings = [];
+    if (model.scopeNotice) warnings.push(model.scopeNotice);
     if (!model.trusted) warnings.push('Restricted Mode: trust this workspace to change permissions.');
     if (!model.workspace) warnings.push('Open a local workspace folder to manage its permissions.');
     if (model.configurationError) warnings.push(model.trusted ? 'Use Reconfigure access to select permissions again, or Recover saved configuration when available.' : 'Trust this workspace to reconfigure or recover. Files repaired on disk are reloaded automatically.');

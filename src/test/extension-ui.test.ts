@@ -60,6 +60,8 @@ async function activateInFixture(t: TestContext, isTrusted = true, failBackupSav
 
   const errors: string[] = [];
   const confirmations: string[] = [];
+  const confirmationDetails: string[] = [];
+  const applyAnswers: Array<string | undefined> = [];
   const informationMessages: string[] = [];
   const inputAnswers: string[] = [];
   const quickAnswers: unknown[] = [];
@@ -75,6 +77,7 @@ async function activateInFixture(t: TestContext, isTrusted = true, failBackupSav
   const beforeBackupSave: Array<() => Promise<void>> = [];
   const openAnswers: unknown[] = [];
   const workspaceFolderListeners = new Set<() => void>();
+  const configurationListeners = new Set<(event: { affectsConfiguration(section: string, resource?: MockUri): boolean }) => unknown>();
   const configuration: Record<string, unknown> = {};
   const chatgptConfiguration: Record<string, unknown> = {};
   const textDocuments: Array<{ isDirty: boolean; uri: MockUri; fileName: string }> = [];
@@ -130,7 +133,10 @@ async function activateInFixture(t: TestContext, isTrusted = true, failBackupSav
       showInformationMessage: async (message: string, ...choices: unknown[]) => {
         informationMessages.push(message);
         if (choices.includes('Apply')) {
-          confirmations.push(message); await beforeApplyConfirmation.shift()?.(); return 'Apply';
+          confirmations.push(message);
+          confirmationDetails.push((choices.find(choice => typeof choice === 'object' && choice !== null) as { detail?: string } | undefined)?.detail ?? '');
+          await beforeApplyConfirmation.shift()?.();
+          return applyAnswers.length ? applyAnswers.shift() : 'Apply';
         }
         return undefined;
       },
@@ -190,6 +196,10 @@ async function activateInFixture(t: TestContext, isTrusted = true, failBackupSav
       onDidChangeWorkspaceFolders: (listener: () => void) => {
         workspaceFolderListeners.add(listener);
         return { dispose: () => { workspaceFolderListeners.delete(listener); } };
+      },
+      onDidChangeConfiguration: (listener: (event: { affectsConfiguration(section: string, resource?: MockUri): boolean }) => unknown) => {
+        configurationListeners.add(listener);
+        return { dispose: () => { configurationListeners.delete(listener); } };
       },
       onDidGrantWorkspaceTrust: disposable,
       onDidCloseTextDocument: (listener: (document: { uri: MockUri }) => unknown) => {
@@ -364,11 +374,19 @@ async function activateInFixture(t: TestContext, isTrusted = true, failBackupSav
     host.workspace.workspaceFolders = [{ name: 'Other workspace', uri: MockUri.file(path.join(path.dirname(root), 'other-workspace')), index: 0 }];
     for (const listener of workspaceFolderListeners) listener();
   };
-  return { root, state, scope, projectRow, webview, messages, originals, errors, confirmations, informationMessages, nativeCommand,
+  const fireConfigurationChange = (...names: string[]): void => {
+    for (const listener of configurationListeners) listener({
+      affectsConfiguration: (section, resource) => {
+        if (resource) assert.equal(resource.fsPath, root);
+        return names.some(name => name === section || name.startsWith(`${section}.`));
+      },
+    });
+  };
+  return { root, state, scope, projectRow, webview, messages, originals, errors, confirmations, confirmationDetails, applyAnswers, informationMessages, nativeCommand,
     backups, durable, storageControl, restart, dispatch, command, toggle, children, read, inputAnswers, quickAnswers, warningAnswers, configuration, chatgptConfiguration,
     textDocuments, watcherPatterns, activeWatcherPatterns, fireFileEvent, emitFileEvent, waitForState,
     pauseNextLoadedSnapshot, openedDocuments, beforeApplyConfirmation, beforeRestoreConfirmation, quickPickPrompts, previewProviders, executeCalls, closePreviewDocument,
-    beforePresetInput, beforePresetConfirmation, beforeBackupSave, openAnswers, removeSelectedWorkspace };
+    beforePresetInput, beforePresetConfirmation, beforeBackupSave, openAnswers, removeSelectedWorkspace, fireConfigurationChange };
 }
 
 /** Expand actual rows lazily; there are two access values on each returned file/folder. */
@@ -394,6 +412,7 @@ async function resourceRow(ui: Awaited<ReturnType<typeof activateInFixture>>, re
 
 test('Workspace files show existing shared selection and apply an exact file write without enabling projects', async (t) => {
   const ui = await activateInFixture(t);
+  ui.configuration.codexFilesystemMode = 'strict';
   assert.equal(ui.state().resources?.label, 'Workspace files');
   assert.equal(ui.state().resources?.selectable, true, 'The resource section selects the permitted resource frontier without granting the whole workspace');
   const rootRows = await ui.children('.', 'resource');
@@ -425,6 +444,7 @@ test('Workspace files show existing shared selection and apply an exact file wri
 
 test('Root files and resource visibility save, reload and restore independently of project settings', async (t) => {
   const ui = await activateInFixture(t);
+  ui.configuration.codexFilesystemMode = 'strict';
   const readme = await resourceRow(ui, 'README.md');
   await ui.toggle(readme, 'read', true);
   await ui.dispatch({ type: 'command', workspaceId: ui.state().workspaceId, target: 'resource', command: 'toggleResourceVisibility', relative: 'README.md' });
@@ -568,8 +588,150 @@ test('Explicit Apply uses the selected Codex runtime root and preserves local po
   assert.equal(ui.state().dirty, false);
 });
 
+test('Auto with a native Windows runtime explains root reads and grants only selected writes on every host', async (t) => {
+  const ui = await activateInFixture(t);
+  ui.configuration.codexWorkspaceRoot = 'E:\\Remote\\Workspace';
+  ui.configuration.codexFilesystemMode = 'auto';
+  await ui.toggle(await resourceRow(ui, 'Instructions/guide.md'), 'write', true);
+  assert.match(ui.state().scopeNotice ?? '', /Windows compatibility.*outside selected paths/i);
+  assert.match(ui.state().scopeNotice ?? '', /disabled projects.*readable/i);
+  for (const [file, original] of ui.originals) assert.equal(await ui.read(file), original);
+
+  await ui.command('apply');
+  assert.deepEqual(ui.errors, []);
+  assert.match(ui.confirmations.at(-1)!, /Windows compatibility.*outside selected paths remain readable/i);
+  assert.match(ui.confirmationDetails.at(-1)!, /OS-level reads of all files.*disabled projects/i);
+  const codex = TOML.parse(await ui.read('.codex/config.toml')) as Record<string, any>;
+  const filesystem = codex.permissions.agentscope.filesystem;
+  assert.equal(filesystem[':root'], 'read', 'The elevated Windows helper must receive effective root read');
+  assert.equal(Object.values(filesystem).includes('deny'), false, 'Disabled projects cannot add unsupported Windows read denies');
+  assert.deepEqual(Object.entries(filesystem).filter(([, mode]) => mode === 'write'), [
+    [':tmpdir', 'write'], ['E:\\Remote\\Workspace\\Instructions\\guide.md', 'write'],
+  ]);
+  assert.equal(filesystem['E:\\Remote\\Workspace'], undefined);
+  assert.equal(filesystem[path.join(ui.root, 'Instructions', 'guide.md')], undefined);
+  assert.equal(codex.model, 'example-model');
+  const saved = readAccessRegistry(await ui.read('AGENTS.md'), await ui.read(ACCESS_POLICY_FILE))!;
+  assert.equal(saved.submodules.project.enabled, false, 'The compatibility fallback must not enable the disabled project');
+  assert.deepEqual(saved.shared_resources.write_paths, ['Instructions/guide.md']);
+});
+
+test('Cancelling Windows compatibility leaves all policies, config files and recovery journals untouched', async (t) => {
+  const ui = await activateInFixture(t);
+  ui.configuration.codexWorkspaceRoot = 'E:\\Remote\\Workspace';
+  ui.applyAnswers.push(undefined);
+  await ui.toggle(await resourceRow(ui, 'Instructions/guide.md'), 'write', true);
+  await ui.command('apply');
+  assert.deepEqual(ui.errors, []);
+  assert.match(ui.confirmations.at(-1)!, /Windows compatibility/i);
+  assert.equal(ui.state().dirty, true);
+  for (const [file, original] of ui.originals) assert.equal(await ui.read(file), original);
+  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+  assert.equal(ui.backups.size, 0);
+  assert.equal(ui.durable.size, 0);
+});
+
+test('An old preset without filesystem mode inherits the configured Strict choice', async (t) => {
+  const ui = await activateInFixture(t);
+  ui.configuration.codexWorkspaceRoot = 'E:\\Remote\\Workspace';
+  ui.inputAnswers.push('Legacy');
+  await ui.command('savePreset');
+  const storePath = '.vscode/agentscope-presets.json';
+  const store = parseJsoncStrict(await ui.read(storePath), 'Legacy preset') as Record<string, any>;
+  delete store.presets.Legacy.options.codexFilesystemMode;
+  await fs.writeFile(path.join(ui.root, storePath), `${JSON.stringify(store, null, 2)}\n`);
+  ui.configuration.codexFilesystemMode = 'strict';
+  await ui.restart();
+  ui.quickAnswers.push('Legacy');
+  await ui.command('activatePreset');
+  assert.deepEqual(ui.errors, []);
+  assert.equal(ui.state().preset, 'Legacy');
+  const filesystem = (TOML.parse(await ui.read('.codex/config.toml')) as Record<string, any>).permissions.agentscope.filesystem;
+  assert.equal(filesystem[':root'], 'deny');
+  assert.equal(filesystem['E:\\Remote\\Workspace\\project'], 'deny');
+  assert.doesNotMatch(ui.confirmations.at(-1)!, /Apply Windows compatibility/i);
+  assert.match(ui.state().scopeNotice ?? '', /Strict.*Windows.*compatible sandbox/i);
+});
+
+test('Explicit Auto in a preset resolves current runtime settings and replaces Windows grants when switched to WSL', async (t) => {
+  const ui = await activateInFixture(t, true, false, { enabled: true });
+  ui.configuration.codexFilesystemMode = 'auto';
+  ui.inputAnswers.push('Portable');
+  await ui.command('savePreset');
+  const storePath = '.vscode/agentscope-presets.json';
+  const store = parseJsoncStrict(await ui.read(storePath), 'Portable preset') as Record<string, any>;
+  // Older presets can carry an explicit Auto mode without pinning a runtime root.
+  delete store.presets.Portable.options.codexWorkspaceRoot;
+  await fs.writeFile(path.join(ui.root, storePath), `${JSON.stringify(store, null, 2)}\n`);
+  ui.configuration.codexFilesystemMode = 'strict';
+  ui.configuration.codexWorkspaceRoot = 'E:\\Remote\\Workspace';
+  await ui.restart();
+  ui.quickAnswers.push('Portable');
+  await ui.command('activatePreset');
+  assert.deepEqual(ui.errors, []);
+  let filesystem = (TOML.parse(await ui.read('.codex/config.toml')) as Record<string, any>).permissions.agentscope.filesystem;
+  assert.equal(filesystem[':root'], 'read', 'The preset explicitly saved Auto, so it overrides the later configured Strict setting');
+  assert.equal(filesystem['E:\\Remote\\Workspace\\project\\drafts'], 'write');
+
+  ui.configuration.codexWorkspaceRoot = '/mnt/e/Remote/Workspace';
+  ui.chatgptConfiguration.runCodexInWindowsSubsystemForLinux = true;
+  ui.fireConfigurationChange('agentscope.codexWorkspaceRoot', 'chatgpt.runCodexInWindowsSubsystemForLinux');
+  await ui.waitForState(model => model.dirty && model.scopeNotice === undefined, 'Runtime switch draft');
+  await ui.command('apply');
+  assert.deepEqual(ui.errors, []);
+  filesystem = (TOML.parse(await ui.read('.codex/config.toml')) as Record<string, any>).permissions.agentscope.filesystem;
+  assert.equal(filesystem[':root'], 'deny');
+  assert.equal(filesystem['/mnt/e/Remote/Workspace/project/references'], 'read');
+  assert.equal(filesystem['/mnt/e/Remote/Workspace/project/drafts'], 'write');
+  assert.equal(Object.keys(filesystem).some(key => key.startsWith('E:')), false, 'The obsolete native runtime profile must be replaced');
+  assert.doesNotMatch(ui.confirmations.at(-1)!, /Apply Windows compatibility/i);
+  assert.equal(ui.state().dirty, false);
+});
+
+test('Relevant VS Code setting changes mark a draft and refresh the notice without writing configuration', async (t) => {
+  const ui = await activateInFixture(t);
+  ui.configuration.codexWorkspaceRoot = '/mnt/e/Remote/Workspace';
+  await ui.command('apply');
+  const before = new Map<string, string>();
+  for (const file of ['AGENTS.md', ACCESS_POLICY_FILE, '.vscode/settings.json', '.codex/config.toml']) before.set(file, await ui.read(file));
+  const confirmations = ui.confirmations.length;
+  ui.fireConfigurationChange('editor.tabSize');
+  assert.equal(ui.state().dirty, false, 'Unrelated editor settings must not dirty scope configuration');
+  ui.configuration.codexWorkspaceRoot = 'E:\\Remote\\Workspace';
+  ui.fireConfigurationChange('agentscope.codexWorkspaceRoot');
+  await ui.waitForState(model => model.dirty && /Windows compatibility/.test(model.scopeNotice ?? ''), 'Native runtime notice');
+  for (const [file, original] of before) assert.equal(await ui.read(file), original);
+  assert.equal(ui.confirmations.length, confirmations);
+
+  ui.configuration.codexWorkspaceRoot = '/mnt/e/Remote/Workspace';
+  ui.chatgptConfiguration.runCodexInWindowsSubsystemForLinux = true;
+  ui.fireConfigurationChange('chatgpt.runCodexInWindowsSubsystemForLinux');
+  await ui.waitForState(model => model.dirty && model.scopeNotice === undefined, 'WSL runtime notice');
+  for (const [file, original] of before) assert.equal(await ui.read(file), original);
+  assert.equal(ui.confirmations.length, confirmations);
+});
+
+test('Runtime changes during Apply confirmation abort before publishing the stale native profile', async (t) => {
+  const ui = await activateInFixture(t);
+  ui.configuration.codexWorkspaceRoot = 'E:\\Remote\\Workspace';
+  ui.beforeApplyConfirmation.push(async () => {
+    ui.configuration.codexWorkspaceRoot = '/mnt/e/Remote/Workspace';
+    ui.chatgptConfiguration.runCodexInWindowsSubsystemForLinux = true;
+    ui.fireConfigurationChange('agentscope.codexWorkspaceRoot', 'chatgpt.runCodexInWindowsSubsystemForLinux');
+  });
+  await ui.command('apply');
+  assert.equal(ui.errors.length, 1);
+  assert.match(ui.errors[0], /runtime.*settings changed.*Preview/i);
+  for (const [file, original] of ui.originals) assert.equal(await ui.read(file), original);
+  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+  assert.equal(ui.backups.size, 0);
+  assert.equal(ui.durable.size, 0);
+  assert.equal(ui.state().dirty, true);
+});
+
 test('Webview commands draft, apply the separate policy and configurations, then restore originals', async (t) => {
   const ui = await activateInFixture(t);
+  ui.configuration.codexFilesystemMode = 'strict';
   assert.ok(ui.watcherPatterns.includes(ACCESS_POLICY_FILE), 'Watch external edits to the linked access policy');
   assert.equal(ui.projectRow().enabled, false);
   await ui.command('toggleAccess', 'project');
@@ -1033,6 +1195,7 @@ test('Webview Apply aborts before writing when backup persistence fails', async 
 
 test('A same-row read checkbox resets disabled whole-project grants and applies only its file', async (t) => {
   const ui = await activateInFixture(t, true, false, { restrict_paths: false, read_paths: ['.'], write_paths: ['.'] });
+  ui.configuration.codexFilesystemMode = 'strict';
   const relative = 'references/nested/paper.md';
   const file = await findPathRow(ui, relative);
   assert.equal(file.directory, false); assert.equal(file.read.checked, false); assert.equal(file.write.checked, false);

@@ -7,7 +7,7 @@ import { isResourcePath } from './resources';
 import { applyPlan } from './transactions';
 import { DirectoryIdentity, Registry } from './types';
 import type { ApplyOptions } from './workspace';
-import { runtimeWorkspaceRoot } from './core/runtimePaths';
+import { resolveFilesystemMode, runtimeWorkspaceRoot } from './core/runtimePaths';
 
 export interface ScopePreset {
   registry: Registry;
@@ -59,7 +59,8 @@ function validatePreset(value: unknown, root: string): asserts value is ScopePre
     }
   }
   validateOptions(value.options);
-  runtimeWorkspaceRoot(root, value.options.codexRuntime, value.options.codexWorkspaceRoot);
+  const runtimeRoot = runtimeWorkspaceRoot(root, value.options.codexRuntime, value.options.codexWorkspaceRoot);
+  resolveFilesystemMode(runtimeRoot, value.options.codexFilesystemMode);
 }
 
 /** JSONC's ordinary object parser treats __proto__ as a setter; define keys safely. */

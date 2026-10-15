@@ -13,7 +13,7 @@ import { isResourcePath, listWorkspaceChildren, listWorkspaceSelectionRoots, wor
 import { readPresets, writePreset, deletePreset, ScopePreset } from './presets';
 import { ScopeView, ScopeViewModel, PermissionRow } from './scopeView';
 import { ApplyPlan, FileChange, WorkspaceState } from './types';
-import type { CodexRuntime } from './core/runtimePaths';
+import { CodexFilesystemMode, CodexRuntime, resolveFilesystemMode, runtimeWorkspaceRoot } from './core/runtimePaths';
 
 type ScopeNode = { kind: 'module'; name: string };
 
@@ -100,6 +100,7 @@ export function activate(context: vscode.ExtensionContext): void {
       ...(hasWorkspaceResources() ? { resources: workspaceResourceRow('.', true, workspaceSelectionRoots.length > 0) } : {}),
       resourceHidden: currentState?.resourceHidden ?? {},
       preset: selectedPreset,
+      scopeNotice: scopeNotice(),
     };
   }
 
@@ -512,19 +513,45 @@ export function activate(context: vscode.ExtensionContext): void {
       allowNetwork: config.get<boolean>('allowCommandNetwork', false),
       codexRuntime: config.get<CodexRuntime>('codexRuntime', 'auto'),
       codexWorkspaceRoot: config.get<string>('codexWorkspaceRoot', ''),
+      codexFilesystemMode: config.get<CodexFilesystemMode>('codexFilesystemMode', 'auto'),
     };
   }
 
-  async function plan(): Promise<ApplyPlan> {
-    const current = state();
-    await ensureWritableWorkspace(current);
-    const options = presetOptions ?? configuredOptions();
-    const runInWsl = vscode.workspace.getConfiguration('chatgpt', vscode.Uri.file(current.root))
+  function effectiveOptions(): ApplyOptions {
+    // Older snapshots inherit settings added after they were saved.
+    return { ...configuredOptions(), ...presetOptions };
+  }
+
+  function resolvedOptions(): ApplyOptions {
+    const options = effectiveOptions();
+    const runInWsl = vscode.workspace.getConfiguration('chatgpt', vscode.Uri.file(state().root))
       .get<boolean>('runCodexInWindowsSubsystemForLinux', false);
-    const result = await buildApplyPlan(current, {
+    return {
       ...options,
       codexRuntime: (options.codexRuntime ?? 'auto') === 'auto' && runInWsl ? 'wsl' : options.codexRuntime,
-    });
+    };
+  }
+
+  function scopeNotice(): string | undefined {
+    if (!currentState || configurationError) return undefined;
+    try {
+      const options = resolvedOptions();
+      if (!options.generateCodexProfile) return undefined;
+      const runtimeRoot = runtimeWorkspaceRoot(currentState.root, options.codexRuntime, options.codexWorkspaceRoot);
+      if (resolveFilesystemMode(runtimeRoot, options.codexFilesystemMode) === 'windows-compatible') {
+        return 'Windows compatibility: files outside selected paths, including disabled projects, remain readable. Writes stay limited to selected paths; Read choices remain agent instructions. For read isolation, use WSL2 or Strict with a compatible native sandbox.';
+      }
+      if (resolveFilesystemMode(runtimeRoot) === 'windows-compatible') {
+        return 'Strict read isolation on Windows requires a compatible sandbox such as MXC. Legacy Windows sandboxes may refuse to start; use Auto for Windows compatibility or run Codex in WSL2.';
+      }
+    } catch (error) { return errorMessage(error); }
+    return undefined;
+  }
+
+  async function plan(options = resolvedOptions()): Promise<ApplyPlan> {
+    const current = state();
+    await ensureWritableWorkspace(current);
+    const result = await buildApplyPlan(current, options);
     ensureWorkspace(current);
     assertSavedDocuments(result);
     return result;
@@ -585,11 +612,21 @@ export function activate(context: vscode.ExtensionContext): void {
     const current = state();
     writing = true; update();
     try {
-      const result = await plan();
-      const validateWrite = async () => { await ensureWritableWorkspace(current); assertSavedDocuments(result); };
+      const optionsSnapshot = resolvedOptions();
+      const optionsBefore = JSON.stringify(optionsSnapshot);
+      const result = await plan(optionsSnapshot);
+      const validateWrite = async () => {
+        await ensureWritableWorkspace(current);
+        assertSavedDocuments(result);
+        if (JSON.stringify(resolvedOptions()) !== optionsBefore) {
+          throw new Error('Codex runtime or AgentScope settings changed. Preview the updated configuration before applying again.');
+        }
+      };
       if (!result.changes.length) { await applyPlan(result, validateWrite); current.dirty = false; vscode.window.showInformationMessage('AgentScope: Configuration is already up to date.'); return; }
       const selection = await vscode.window.showInformationMessage(
-        `Save scope settings for ${path.basename(current.root)}? ${result.changes.length} configuration files will change.`,
+        result.broadReadAccess
+          ? `Apply Windows compatibility for ${path.basename(current.root)}? Files outside selected paths remain readable. ${result.changes.length} configuration files will change.`
+          : `Save scope settings for ${path.basename(current.root)}? ${result.changes.length} configuration files will change.`,
         { modal: true, detail: `${result.warnings.join('\n')}\nExisting prose and unrelated settings are preserved. A running Codex session may need to restart before these settings take effect.`.trim() },
         'Apply', 'Preview',
       );
@@ -793,7 +830,7 @@ export function activate(context: vscode.ExtensionContext): void {
         if (replace !== 'Replace') return;
       }
       const snapshot: ScopePreset = structuredClone({ registry: current.registry, hidden: current.hidden,
-        resourceHidden: current.resourceHidden ?? {}, options: presetOptions ?? configuredOptions() });
+        resourceHidden: current.resourceHidden ?? {}, options: effectiveOptions() });
       await validatePresetWrite(current);
       await writePreset(current.root, name.trim(), snapshot, () => validatePresetWrite(current));
       selectedPreset = name.trim();
@@ -1058,6 +1095,15 @@ export function activate(context: vscode.ExtensionContext): void {
     drainDeferredChanges();
   }));
   context.subscriptions.push(vscode.workspace.onDidGrantWorkspaceTrust(update));
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+    if (!currentState) return;
+    const resource = vscode.Uri.file(currentState.root);
+    if (event.affectsConfiguration('agentscope', resource) ||
+      event.affectsConfiguration('chatgpt.runCodexInWindowsSubsystemForLinux', resource)) {
+      currentState.dirty = true;
+      update();
+    }
+  }));
   context.subscriptions.push(vscode.workspace.onDidCloseTextDocument(document => { previews.documents.delete(document.uri.toString()); }));
   context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider('agentscope-preview', previews), previews, view, status,
     { dispose: () => { disposed = true; queuedReloadRoot = undefined; for (const watcher of watchers) { watcher.dispose(); } } });

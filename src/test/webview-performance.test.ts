@@ -142,6 +142,20 @@ function fileRow(name: string, relative: string, directory = false) {
   return { name, relative, label: path.posix.basename(relative), directory, project: false, read: selection, write: selection };
 }
 
+test('The panel renders the active filesystem compatibility notice and removes it after a runtime change', () => {
+  const ui = browser();
+  const notice = ui.ids.get('notice')!;
+  const state = ui.state([projectRow('app')], {
+    scopeNotice: 'Windows compatibility: files outside selected paths, including disabled projects, remain readable.',
+  });
+  ui.send({ type: 'state', state });
+  assert.equal(notice.hidden, false);
+  assert.match(notice.textContent, /outside selected paths.*disabled projects.*readable/);
+  ui.send({ type: 'state', state: { ...state, scopeNotice: undefined } });
+  assert.equal(notice.hidden, true);
+  assert.equal(notice.textContent, '');
+});
+
 test('An unchanged 200-project state creates no new rows, listeners or table mutations', t => {
   const ui = browser();
   const projects = Array.from({ length: 200 }, (_, index) => projectRow(`app-${index}`));

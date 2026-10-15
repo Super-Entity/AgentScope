@@ -2,7 +2,7 @@
   "name": "agentscope",
   "displayName": "AgentScope",
   "description": "Manage project visibility, agent instructions and Codex filesystem scopes from one workspace panel.",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "icon": "media/icon.png",
   "publisher": "SuperEntity",
   "license": "MIT",
@@ -251,6 +251,18 @@
           "default": "",
           "scope": "resource",
           "description": "Optional absolute path of the selected workspace as seen by Codex, for example /mnt/d/MyApps. Use for custom WSL mount points or other runtime path mappings. Apply to regenerate the profile."
+        },
+        "agentscope.codexFilesystemMode": {
+          "type": "string",
+          "enum": ["auto", "strict", "windows-compatible"],
+          "enumDescriptions": [
+            "Use Windows compatibility for Windows runtime paths and strict read isolation for Linux, macOS and WSL paths.",
+            "Restrict reads and writes to selected paths. Native Windows requires a compatible sandbox such as MXC; legacy Windows sandboxes may refuse to start.",
+            "Allow broad reads on native Windows while restricting writes to selected paths. Read choices remain agent instructions. Linux, macOS and WSL keep strict read isolation."
+          ],
+          "default": "auto",
+          "scope": "resource",
+          "description": "Filesystem compatibility for the selected Codex runtime. Auto permits reading files outside selected paths on native Windows. Preview and Apply to regenerate the profile; start a new Codex session."
         },
         "agentscope.excludeFromSearch": {
           "type": "boolean",

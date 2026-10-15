@@ -35,6 +35,7 @@ export interface ScopeViewModel {
   resources?: PermissionRow;
   resourceHidden?: Record<string, boolean>;
   preset?: string | null;
+  scopeNotice?: string;
 }
 
 export class ScopeView implements vscode.WebviewViewProvider, vscode.Disposable {

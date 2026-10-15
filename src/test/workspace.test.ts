@@ -10,11 +10,77 @@ import { applyPlan, restoreChanges } from '../transactions';
 import { directoryLink, fixture, policy, project, registry } from './helpers';
 import { toggleResourceSelection } from '../resources';
 
-const options: ApplyOptions = { generateCodexProfile: true, profileName: 'agentscope', excludeFromSearch: true, allowNetwork: false };
+const options: ApplyOptions = { generateCodexProfile: true, profileName: 'agentscope', excludeFromSearch: true, allowNetwork: false, codexFilesystemMode: 'strict' };
 
 function filesystem(text: string): Record<string, string> {
   return (TOML.parse(text) as unknown as { permissions: { agentscope: { filesystem: Record<string, string> } } }).permissions.agentscope.filesystem;
 }
+
+test('Switching Windows and WSL profiles replaces stale grants and preserves the policy and user configuration', async (t) => {
+  const { root } = await fixture(t);
+  await fs.mkdir(path.join(root, 'Instructions'));
+  await fs.mkdir(path.join(root, 'project', 'references'), { recursive: true });
+  await fs.mkdir(path.join(root, 'project', 'drafts'));
+  await fs.mkdir(path.join(root, 'disabled'));
+  await fs.mkdir(path.join(root, '.codex'));
+  const saved = registry({ disabled: project({ path: 'disabled', enabled: false }) });
+  await fs.writeFile(path.join(root, 'AGENTS.md'), policy(saved));
+  await fs.writeFile(path.join(root, '.codex/config.toml'), '# Keep user configuration\n[features]\ncustom = true\n');
+  const auto: ApplyOptions = { ...options, codexFilesystemMode: 'auto', codexWorkspaceRoot: 'E:\\Apps', codexRuntime: 'native' };
+  const windows = await buildApplyPlan(await loadWorkspace(root), auto);
+  assert.equal(windows.broadReadAccess, true);
+  assert.ok(windows.warnings.some(warning => /disabled projects and unselected paths/.test(warning)));
+  const native = filesystem(windows.changes.find(change => change.path.endsWith('config.toml'))!.after);
+  assert.equal(native[':root'], 'read');
+  assert.equal(native['E:\\Apps\\project\\drafts'], 'write');
+  assert.ok(!Object.values(native).includes('deny'));
+  assert.equal(native['E:\\Apps'], undefined);
+  await applyPlan(windows);
+  const policyBefore = await fs.readFile(path.join(root, ACCESS_POLICY_FILE), 'utf8');
+
+  const wsl = await buildApplyPlan(await loadWorkspace(root), { ...auto, codexRuntime: 'wsl', codexWorkspaceRoot: '/mnt/e/Apps' });
+  assert.equal(wsl.broadReadAccess, false);
+  assert.deepEqual(wsl.changes.map(change => path.relative(root, change.path)), [path.join('.codex', 'config.toml')]);
+  await applyPlan(wsl);
+  const wslText = await fs.readFile(path.join(root, '.codex/config.toml'), 'utf8');
+  const linux = filesystem(wslText);
+  assert.equal(linux[':root'], 'deny');
+  assert.equal(linux['/mnt/e/Apps/project/drafts'], 'write');
+  assert.equal(linux['/mnt/e/Apps/disabled'], 'deny');
+  assert.equal(linux['/mnt/e/Apps/project/references'], 'read');
+  assert.ok(!Object.keys(linux).some(key => /^[A-Za-z]:/.test(key)));
+  assert.equal((TOML.parse(wslText) as any).features.custom, true);
+  assert.match(wslText, /# Keep user configuration/);
+  assert.equal(await fs.readFile(path.join(root, ACCESS_POLICY_FILE), 'utf8'), policyBefore);
+
+  const again = await buildApplyPlan(await loadWorkspace(root), auto);
+  assert.equal(again.broadReadAccess, true);
+  const next = filesystem(again.changes.find(change => change.path.endsWith('config.toml'))!.after);
+  assert.ok(!Object.keys(next).some(key => key.startsWith('/mnt/')));
+  assert.deepEqual(next, native);
+});
+
+test('Disabled profile generation skips compatibility validation and leaves Codex configuration untouched', async (t) => {
+  const { root } = await fixture(t);
+  await fs.mkdir(path.join(root, '.codex'));
+  const original = '# Independently managed\ninvalid = [\n';
+  await fs.writeFile(path.join(root, '.codex/config.toml'), original);
+  const plan = await buildApplyPlan(await loadWorkspace(root), { ...options, generateCodexProfile: false, codexFilesystemMode: 'windows-compatible' });
+  assert.equal(plan.broadReadAccess, false);
+  assert.ok(!plan.changes.some(change => change.path.endsWith('config.toml')));
+  await applyPlan(plan);
+  assert.equal(await fs.readFile(path.join(root, '.codex/config.toml'), 'utf8'), original);
+});
+
+test('A malformed filesystem mode cannot silently turn a Windows target into broad-read Auto', async (t) => {
+  const { root } = await fixture(t);
+  const state = await loadWorkspace(root);
+  await assert.rejects(buildApplyPlan(state, {
+    ...options, codexRuntime: 'native', codexWorkspaceRoot: 'E:\\Apps',
+    codexFilesystemMode: null as unknown as ApplyOptions['codexFilesystemMode'],
+  }), /filesystem mode/);
+  assert.deepEqual(await fs.readdir(root), []);
+});
 
 test('Workspace-resource visibility preserves unrelated exact exclusions and applies only explicit choices', async (t) => {
   const { root } = await fixture(t);

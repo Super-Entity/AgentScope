@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import * as TOML from '@iarna/toml';
 import { generateProfile, updateCodexConfig } from '../core/profile';
 import { ACCESS_POLICY_FILE, emptyRegistry } from '../core/registry';
+import type { CodexFilesystemMode } from '../core/runtimePaths';
 import { fixture, project, registry } from './helpers';
 
 function parsedProfile(text: string): { filesystem: Record<string, string>; network: { enabled: boolean } } {
@@ -16,7 +17,7 @@ test('Generated permissions retain precise read/write paths and deny disabled pr
   const value = registry({ disabled: project({ path: 'secret', enabled: false, restrict_paths: false }), all: project({ path: 'full', restrict_paths: false }) });
   const gitRead = path.join(root, 'project', '.git');
   const gitWrite = path.join(root, '.git', 'modules', 'project');
-  const output = generateProfile(value, { root, profileName: 'agentscope', allowNetwork: false, gitReadPaths: [gitRead], gitWritePaths: [gitWrite] });
+  const output = generateProfile(value, { root, filesystemMode: 'strict', profileName: 'agentscope', allowNetwork: false, gitReadPaths: [gitRead], gitWritePaths: [gitWrite] });
   const parsed = parsedProfile(output.text);
   assert.equal(parsed.filesystem[':root'], 'deny');
   assert.equal(parsed.filesystem[':minimal'], 'read');
@@ -33,12 +34,13 @@ test('Generated permissions retain precise read/write paths and deny disabled pr
   assert.equal(parsed.filesystem[gitWrite], 'write');
   assert.equal(parsed.network.enabled, false);
   assert.ok(output.warnings.length > 0);
+  assert.equal(output.broadReadAccess, false);
 });
 
 test('An enabled restricted project with empty paths receives no project grant', async (t) => {
   const { root } = await fixture(t);
   const value = registry({ project: project({ read_paths: [], write_paths: [] }) });
-  const output = parsedProfile(generateProfile(value, { root, profileName: 'agentscope', allowNetwork: true }).text);
+  const output = parsedProfile(generateProfile(value, { root, filesystemMode: 'strict', profileName: 'agentscope', allowNetwork: true }).text);
   assert.equal(output.filesystem[path.join(root, 'project')], undefined);
   assert.equal(Object.keys(output.filesystem).some(key => key.startsWith(path.join(root, 'project') + path.sep)), false);
   assert.equal(output.network.enabled, true);
@@ -79,7 +81,7 @@ test('Runtime path overrides never bypass local Git metadata containment checks'
 test('An actual selected filesystem root remains a valid resolved runtime anchor', () => {
   const root = path.parse(process.cwd()).root;
   const output = parsedProfile(generateProfile(emptyRegistry(), {
-    root, runtimeRoot: root, profileName: 'agentscope', allowNetwork: false,
+    root, runtimeRoot: root, filesystemMode: 'strict', profileName: 'agentscope', allowNetwork: false,
   }).text);
   assert.equal(output.filesystem[path.join(root, ACCESS_POLICY_FILE)], 'read');
   assert.equal(output.filesystem[root], undefined);
@@ -89,10 +91,107 @@ test('An ordinary repository profile grants selected subtrees without granting t
   const { root } = await fixture(t);
   const value = emptyRegistry();
   value.submodules.repository = project({ path: '.', read_paths: ['src'], write_paths: ['docs'], instruction_file: 'src/workflow.md' });
-  const output = parsedProfile(generateProfile(value, { root, profileName: 'agentscope', allowNetwork: false }).text);
+  const output = parsedProfile(generateProfile(value, { root, filesystemMode: 'strict', profileName: 'agentscope', allowNetwork: false }).text);
   assert.equal(output.filesystem[root], undefined);
   assert.equal(output.filesystem[path.join(root, 'src')], 'read');
   assert.equal(output.filesystem[path.join(root, 'docs')], 'write');
+});
+
+test('Windows compatibility allows broad reads without adding writes or disabled-project denies', async (t) => {
+  const { root } = await fixture(t);
+  const value = registry({ disabled: project({ path: 'secret', enabled: false }), empty: project({ path: 'empty', read_paths: [], write_paths: [] }) });
+  const gitWrite = path.join(root, '.git', 'modules', 'project');
+  const output = generateProfile(value, {
+    root, runtimeRoot: 'D:\\MyApps', profileName: 'agentscope', allowNetwork: false,
+    gitReadPaths: [path.join(root, 'project', '.git')], gitWritePaths: [gitWrite],
+  });
+  const permissions = parsedProfile(output.text).filesystem;
+  assert.equal(output.broadReadAccess, true);
+  assert.equal(permissions[':root'], 'read');
+  assert.equal(Object.values(permissions).includes('deny'), false);
+  assert.deepEqual(Object.entries(permissions).filter(([, mode]) => mode === 'write').map(([target]) => target), [
+    ':tmpdir', 'D:\\MyApps\\project\\drafts', 'D:\\MyApps\\.git\\modules\\project',
+  ]);
+  assert.equal(permissions['D:\\MyApps\\project\\references'], undefined, 'Redundant reads must not become Windows read-only carveouts');
+  assert.equal(permissions['D:\\MyApps\\secret'], undefined);
+  assert.equal(permissions['D:\\MyApps\\empty'], undefined);
+  assert.equal(parsedProfile(output.text).network.enabled, false);
+  assert.match(output.text, /# WARNING: .*all files, including disabled projects and unselected paths/);
+  assert.ok(output.warnings.some(warning => /Read selections are behavioral instructions only/.test(warning)));
+  assert.ok(output.warnings.some(warning => /unelevated sandbox/.test(warning)));
+});
+
+test('A redundant read parent does not obstruct its precise writable descendant on Windows', async (t) => {
+  const { root } = await fixture(t);
+  const value = registry({ project: project({ read_paths: ['src'], write_paths: ['src/generated'] }) });
+  const output = generateProfile(value, { root, runtimeRoot: 'D:\\MyApps', profileName: 'agentscope', allowNetwork: false });
+  const permissions = parsedProfile(output.text).filesystem;
+  assert.equal(permissions['D:\\MyApps\\project\\src'], undefined);
+  assert.equal(permissions['D:\\MyApps\\project\\src\\generated'], 'write');
+  assert.equal(permissions['D:\\MyApps\\project'], undefined);
+});
+
+test('Windows compatibility preserves read-only carveouts inside an explicitly writable root', async (t) => {
+  const { root } = await fixture(t);
+  const value = emptyRegistry();
+  value.submodules.repository = project({ path: '.', restrict_paths: false });
+  const output = generateProfile(value, { root, runtimeRoot: 'D:\\MyApps', profileName: 'agentscope', allowNetwork: false });
+  const permissions = parsedProfile(output.text).filesystem;
+  assert.equal(permissions['D:\\MyApps'], 'write');
+  assert.equal(permissions['D:\\MyApps\\AGENTS.md'], 'read');
+  assert.equal(permissions['D:\\MyApps\\.agentscope\\access.md'], 'read');
+  assert.equal(permissions['D:\\MyApps\\.codex'], 'read');
+});
+
+test('Windows compatibility refuses writable descendants of retained read-only carveouts', async (t) => {
+  const { root } = await fixture(t);
+  const value = emptyRegistry();
+  value.submodules.repository = project({ path: '.', read_paths: [], write_paths: ['.', '.codex/cache'] });
+  assert.throws(() => generateProfile(value, {
+    root, runtimeRoot: 'D:\\MyApps', profileName: 'agentscope', allowNetwork: false,
+  }), /read-only path .*\.codex.*writable descendant.*WSL2.*MXC.*not broadened/);
+  const strict = generateProfile(value, {
+    root, runtimeRoot: 'D:\\MyApps', filesystemMode: 'strict', profileName: 'agentscope', allowNetwork: false,
+  });
+  assert.equal(parsedProfile(strict.text).filesystem['D:\\MyApps\\.codex\\cache'], 'write');
+});
+
+test('Strict Windows mode retains precise reads and warns that a compatible backend is required', async (t) => {
+  const { root } = await fixture(t);
+  const output = generateProfile(registry({ disabled: project({ path: 'secret', enabled: false }) }), {
+    root, runtimeRoot: 'D:\\MyApps', filesystemMode: 'strict', profileName: 'agentscope', allowNetwork: false,
+  });
+  const permissions = parsedProfile(output.text).filesystem;
+  assert.equal(output.broadReadAccess, false);
+  assert.equal(permissions[':root'], 'deny');
+  assert.equal(permissions['D:\\MyApps\\project\\references'], 'read');
+  assert.equal(permissions['D:\\MyApps\\secret'], 'deny');
+  assert.ok(output.warnings.some(warning => /MXC.*WSL2/.test(warning)));
+  assert.equal((TOML.parse(output.text) as Record<string, unknown>).windows, undefined, 'Generating permissions must not select a sandbox backend');
+});
+
+test('A portable Windows-compatible preset retains strict reads when its runtime is POSIX', async (t) => {
+  const { root } = await fixture(t);
+  for (const filesystemMode of ['auto', 'windows-compatible'] as const) {
+    const output = generateProfile(registry({ disabled: project({ path: 'secret', enabled: false }) }), {
+      root, runtimeRoot: '/mnt/d/MyApps', filesystemMode, profileName: 'agentscope', allowNetwork: false,
+    });
+    const permissions = parsedProfile(output.text).filesystem;
+    assert.equal(output.broadReadAccess, false);
+    assert.equal(permissions[':root'], 'deny');
+    assert.equal(permissions['/mnt/d/MyApps/project/references'], 'read');
+    assert.equal(permissions['/mnt/d/MyApps/secret'], 'deny');
+    assert.equal(output.warnings.some(warning => /OS-level reads of all files/.test(warning)), false);
+  }
+});
+
+test('Invalid filesystem modes fail closed during profile generation', async (t) => {
+  const { root } = await fixture(t);
+  for (const filesystemMode of ['unknown', null, true]) {
+    assert.throws(() => generateProfile(registry(), {
+      root, filesystemMode: filesystemMode as CodexFilesystemMode, profileName: 'agentscope', allowNetwork: false,
+    }), /filesystem mode/);
+  }
 });
 
 test('Profile generation rejects invalid names and Git metadata outside the root', async (t) => {

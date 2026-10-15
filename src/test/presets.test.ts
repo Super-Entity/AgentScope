@@ -34,6 +34,7 @@ test('Two named preset snapshots round trip with relative scopes, visibility, op
   second.hidden.library = false;
   second.registry.shared_resources.read_paths = ['Instructions/Writer.md'];
   second.options.allowNetwork = true;
+  second.options.codexFilesystemMode = 'strict';
   const initial = structuredClone(first);
   await writePreset(root, 'Writing', first);
   await writePreset(root, 'مرور مقاله', second);
@@ -277,6 +278,9 @@ test('Invalid preset scope paths, project visibility or options cannot create or
   const badProfile = snapshot();
   badProfile.options.profileName = '../run-command';
   cases.push({ preset: badProfile, error: /options/ });
+  const badFilesystemMode = snapshot();
+  badFilesystemMode.options.codexFilesystemMode = 'silent-full-access' as NonNullable<ScopePreset['options']['codexFilesystemMode']>;
+  cases.push({ preset: badFilesystemMode, error: /filesystem mode/ });
   for (const item of cases) {
     await assert.rejects(writePreset(root, 'Writing', item.preset), item.error);
     assert.deepEqual(await fs.readdir(root), []);

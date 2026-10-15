@@ -1,6 +1,16 @@
 import * as path from 'node:path';
 
 export type CodexRuntime = 'auto' | 'native' | 'wsl';
+export type CodexFilesystemMode = 'auto' | 'strict' | 'windows-compatible';
+
+/** Resolve against the runtime's path syntax, including mappings from another host OS. */
+export function resolveFilesystemMode(runtimeRoot: string, mode: CodexFilesystemMode = 'auto'): Exclude<CodexFilesystemMode, 'auto'> {
+  if (!['auto', 'strict', 'windows-compatible'].includes(mode)) {
+    throw new Error('Codex filesystem mode must be auto, strict, or windows-compatible.');
+  }
+  const runtime = absolutePath(runtimeRoot, 'The Codex workspace root');
+  return runtime.api === path.win32 && mode !== 'strict' ? 'windows-compatible' : 'strict';
+}
 
 interface AbsolutePath { value: string; api: typeof path.posix }
 

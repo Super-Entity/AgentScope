@@ -31,7 +31,7 @@ VS Code 1.95 or later is required. To update a VSIX installation, download a new
 You can also install from the folder containing the downloaded package with VS Code's CLI:
 
 ```sh
-code --install-extension agentscope-0.7.5.vsix
+code --install-extension agentscope-0.7.6.vsix
 ```
 
 ## Getting started
@@ -95,6 +95,7 @@ Search for `agentscope` in VS Code Settings.
 | `profileName` | `agentscope` | Profile name |
 | `codexRuntime` | `auto` | Generate paths for the native OS or WSL; Auto follows Codex's WSL setting |
 | `codexWorkspaceRoot` | empty | Optional absolute workspace path inside the Codex runtime, for custom drive mounts |
+| `codexFilesystemMode` | `auto` | Windows compatibility for Windows runtime paths; strict read isolation for Linux, macOS and WSL |
 | `excludeFromSearch` | `true` | Apply visibility choices to Search as well as Explorer |
 | `allowCommandNetwork` | `false` | Request command network access in the generated profile |
 
@@ -103,6 +104,20 @@ Disable profile generation to manage policies and visibility without changing Co
 Native Codex sessions keep the selected workspace's Windows, macOS or Linux paths. A VS Code extension running inside WSL already uses Linux paths; Windows VS Code can map the same workspace to its WSL location as described below.
 
 When VS Code runs on Windows and Codex runs in WSL, the profile needs Linux paths such as `/mnt/d/MyApps/.agentscope/access.md`. Auto detects `chatgpt.runCodexInWindowsSubsystemForLinux`; select `wsl` or `native` if needed. For a custom WSL mount, set `codexWorkspaceRoot` to the selected folder's Linux path. After changing the runtime or updating AgentScope, use **Preview → Apply** to regenerate its managed profile, then start a new Codex session.
+
+Filesystem compatibility follows the generated runtime paths, independently of the extension host:
+
+| Codex runtime | Auto filesystem mode | Sandbox boundary |
+| --- | --- | --- |
+| Native Windows, including Windows drive and UNC overrides | Windows compatibility | Broad reads; writes limited to selected paths and runtime temporary storage |
+| Windows VS Code with Codex in WSL2 | Strict | Selected reads and writes, plus minimal runtime/configuration paths |
+| VS Code inside WSL, Linux or macOS | Strict | Selected reads and writes, plus minimal runtime/configuration paths |
+
+Native legacy Windows sandboxes can refuse to start with restricted root reads, reporting `elevated Windows sandbox requires effective ':root' read access`. **Auto** avoids this by generating a Windows-compatible profile. The panel, generated profile and Apply confirmation explain that files outside selected paths, including disabled projects, remain readable at the OS level. Read selections still govern the agent's instructions, but do not enforce read isolation in this mode. Selected write permissions are retained; AgentScope does not disable the sandbox or grant whole-workspace writes.
+
+Use `codexFilesystemMode: strict` when Codex has a compatible native Windows sandbox such as MXC and you need OS-enforced read isolation. WSL2 uses strict mode automatically. Explicit `windows-compatible` remains strict when targeting POSIX paths, so presets can move between environments. Some legacy Windows backends cannot enforce writable descendants inside protected read-only carveouts or split write policies; unsupported layouts need a compatible sandbox or WSL2. AgentScope rejects known unsupported carveouts rather than widening writes.
+
+Existing presets without the new filesystem option inherit the current setting. Explicit runtime choices and workspace-root overrides saved in a preset remain authoritative; `auto` follows the current Codex WSL setting each time you Preview or Apply. Switching between native and WSL runtimes requires another **Preview → Apply** and a new Codex session. The extension marks configuration changes as a pending draft without writing files automatically. One shared generated profile targets one runtime at a time.
 
 ## Access boundaries
 

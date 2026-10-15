@@ -250,7 +250,7 @@ test('Applying and reloading one writable resource creates an exact profile gran
   await fs.writeFile(path.join(root, 'AGENTS.md'), policy(value));
   const state = await loadWorkspace(root);
   state.registry.shared_resources = await toggleResourceSelection(root, state.registry, 'Instructions/Writer.md', 'write', true, false);
-  const options = { generateCodexProfile: true, profileName: 'agentscope', excludeFromSearch: true, allowNetwork: false };
+  const options = { generateCodexProfile: true, profileName: 'agentscope', excludeFromSearch: true, allowNetwork: false, codexFilesystemMode: 'strict' as const };
   const plan = await buildApplyPlan(state, options);
   const config = plan.changes.find(change => change.path.endsWith('config.toml'))!.after;
   const permissions = (TOML.parse(config) as unknown as { permissions: { agentscope: { filesystem: Record<string, string> } } }).permissions.agentscope.filesystem;

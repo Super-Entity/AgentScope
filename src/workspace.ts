@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { updateExcludesSettings } from './core/excludes';
 import { assertDirectoryIdentity, captureDirectoryIdentity, ContainedResolver, createContainedResolver, normalizeRelative, resolveContained, verifyContained } from './core/paths';
 import { generateProfile, updateCodexConfig } from './core/profile';
-import { CodexRuntime, runtimeWorkspaceRoot } from './core/runtimePaths';
+import { CodexFilesystemMode, CodexRuntime, runtimeWorkspaceRoot } from './core/runtimePaths';
 import { ACCESS_POLICY_FILE, emptyRegistry, parseGitmodules, parseJsoncStrict, readAccessRegistry, readAgentsRegistry, validateRegistry, writeAccessFiles, writeReconfiguredAccessFiles } from './core/registry';
 import { ApplyPlan, DiscoveredModule, FileChange, ModuleConfig, Registry, WorkspaceState } from './types';
 import { isResourcePath } from './resources';
@@ -15,6 +15,7 @@ export interface ApplyOptions {
   allowNetwork: boolean;
   codexRuntime?: CodexRuntime;
   codexWorkspaceRoot?: string;
+  codexFilesystemMode?: CodexFilesystemMode;
 }
 
 const agentsFile = 'AGENTS.md';
@@ -460,6 +461,7 @@ export async function buildApplyPlan(state: WorkspaceState, options: ApplyOption
   const scopes = await verifyScopes(state.root, state.registry);
   const warnings = [...state.warnings];
   const changes: FileChange[] = [];
+  let broadReadAccess = false;
   const checks: NonNullable<ApplyPlan['checks']> = [];
   const pathChecks = [...scopes.pathChecks];
   const configResolver = await createContainedResolver(state.root);
@@ -507,8 +509,10 @@ export async function buildApplyPlan(state: WorkspaceState, options: ApplyOption
     const profile = generateProfile(state.registry, {
       root: state.root, runtimeRoot: runtimeWorkspaceRoot(state.root, options.codexRuntime, options.codexWorkspaceRoot),
       profileName: options.profileName, allowNetwork: options.allowNetwork,
+      filesystemMode: options.codexFilesystemMode,
       gitReadPaths: git.read, gitWritePaths: git.write,
     });
+    broadReadAccess = profile.broadReadAccess;
     warnings.push(...profile.warnings);
     const config = await expectedConfiguration(state, codexFile, configResolver);
     const nextConfig = updateCodexConfig(config.before ?? '', profile.text, options.profileName);
@@ -523,5 +527,5 @@ export async function buildApplyPlan(state: WorkspaceState, options: ApplyOption
   // Every destination was checked, including parent junctions, before returning the plan.
   await configResolver.assertUnchanged();
   await assertDirectoryIdentity(state.root, rootIdentity);
-  return { changes, warnings: [...new Set(warnings)], checks, pathChecks, directoryChecks: [{ path: state.root, identity: rootIdentity }] };
+  return { changes, warnings: [...new Set(warnings)], broadReadAccess, checks, pathChecks, directoryChecks: [{ path: state.root, identity: rootIdentity }] };
 }
