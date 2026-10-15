@@ -176,6 +176,14 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
+      - name: Resolve Marketplace member ID
+        if: steps.prepare.outputs.auth == 'azure' && github.event_name == 'workflow_dispatch'
+        run: |
+          profile_id="$(az rest \
+            --url https://app.vssps.visualstudio.com/_apis/profile/profiles/me \
+            --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+            --query id --output tsv)"
+          printf 'Marketplace member ID: `%s`\n' "$profile_id" >> "$GITHUB_STEP_SUMMARY"
       - name: Publish tested VSIX with Microsoft Entra
         if: steps.prepare.outputs.auth == 'azure'
         env:
