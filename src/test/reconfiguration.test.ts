@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { test } from 'node:test';
-import { ACCESS_POLICY_FILE, emptyRegistry, readAccessRegistry, writeAccessFiles, writeReconfiguredAccessFiles } from '../core/registry';
+import { ACCESS_POLICY_FILE, emptyRegistry, writeAccessFiles } from '../core/registry';
+import { readScopeConfiguration, SCOPE_CONFIGURATION_FILE, writeScopeConfiguration } from '../configuration';
 import { togglePathSelection } from '../core/selection';
 import { applyPlan, restoreChanges } from '../transactions';
 import { ApplyOptions, buildApplyPlan, loadWorkspace, loadWorkspaceForReconfiguration } from '../workspace';
@@ -12,7 +13,7 @@ const options: ApplyOptions = { generateCodexProfile: false, profileName: 'agent
 const begin = '<!-- BEGIN AgentScope access reference -->';
 const end = '<!-- END AgentScope access reference -->';
 
-test('Explicit reconfiguration preserves malformed/custom reference prose and repairs only tool controls', () => {
+test('Explicit reconfiguration preserves malformed and customized instruction blocks without regenerating policy files', async (t) => {
   const originals = [
     `${begin}\nAlways keep my custom instruction.\n${end}\nTail instructions.`,
     `${begin}\nDo not remove my prose.\n`,
@@ -21,41 +22,51 @@ test('Explicit reconfiguration preserves malformed/custom reference prose and re
     `<!-- BEGIN AgentScope access policy -->\nMy custom policy rules.\n<!-- END AgentScope access policy -->`,
   ];
   for (const original of originals) {
-    const expectedHistory = original.replace(/<!--\s*(BEGIN|END)\s+AgentScope\b/g, '<!-- Historical AgentScope $1');
-    const rebuilt = writeReconfiguredAccessFiles(original, emptyRegistry());
-    assert.ok(rebuilt.agents.startsWith(begin));
-    assert.ok(rebuilt.agents.endsWith(expectedHistory));
-    assert.deepEqual(readAccessRegistry(rebuilt.agents, rebuilt.access), emptyRegistry());
-    const repeated = writeReconfiguredAccessFiles(rebuilt.agents, emptyRegistry());
-    assert.equal(repeated.agents, rebuilt.agents);
-    assert.equal(repeated.access, rebuilt.access);
+    const { root } = await fixture(t);
+    await fs.writeFile(path.join(root, 'AGENTS.md'), original);
+    const state = await loadWorkspaceForReconfiguration(root);
+    const plan = await buildApplyPlan(state, options);
+    assert.ok(!plan.changes.some(change => change.path === path.join(root, 'AGENTS.md')));
+    await applyPlan(plan);
+    assert.equal(await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8'), original);
+    assert.deepEqual((await loadWorkspace(root)).registry, state.registry);
+    await assert.rejects(fs.stat(path.join(root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+    assert.deepEqual((await buildApplyPlan(await loadWorkspace(root), options)).changes, []);
   }
 });
 
-test('Explicit reconfiguration retains unmarked historical registry bytes even when its JSON is invalid', () => {
+test('Explicit reconfiguration retains unmarked historical registry bytes even when its JSON is invalid', async (t) => {
+  const { root } = await fixture(t);
   const original = '# My instructions\r\n\r\n```jsonc\r\n{ "submodules": { BROKEN, "shared_resources": {} }\r\n```\r\n\r\nKeep my final instruction.\r\n';
-  const rebuilt = writeReconfiguredAccessFiles('\uFEFF' + original, emptyRegistry());
-  assert.ok(rebuilt.agents.startsWith('\uFEFF' + begin));
-  assert.ok(rebuilt.agents.endsWith(original));
-  assert.equal(rebuilt.agents.replace(/\r\n/g, '').includes('\n'), false);
-  assert.equal(rebuilt.access.replace(/\r\n/g, '').includes('\n'), false);
-  assert.deepEqual(readAccessRegistry(rebuilt.agents, rebuilt.access), emptyRegistry());
+  await fs.writeFile(path.join(root, 'AGENTS.md'), '\uFEFF' + original);
+  await applyPlan(await buildApplyPlan(await loadWorkspaceForReconfiguration(root), options));
+  assert.equal(await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8'), '\uFEFF' + original);
+  assert.ok(await fs.stat(path.join(root, SCOPE_CONFIGURATION_FILE)));
+  await assert.rejects(fs.stat(path.join(root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
 });
 
-test('Reference repair ignores all marker-looking lines inside fenced user examples', () => {
+test('Configuration repair ignores marker-looking lines inside fenced user examples', async (t) => {
+  const { root } = await fixture(t);
   const example = '````markdown\n<!-- BEGIN AgentScope access reference --\n```json\n{"submodules": BROKEN}\n```\n' + end + '\n````\n\n~~~text\n' + begin + '\n~~~\n';
   const original = begin + '\nKeep my outside custom text.\n' + end + '\n\n' + example;
-  const rebuilt = writeReconfiguredAccessFiles(original, emptyRegistry());
-  assert.ok(rebuilt.agents.endsWith(example));
-  assert.match(rebuilt.agents, /Historical AgentScope BEGIN access reference/);
-  assert.deepEqual(readAccessRegistry(rebuilt.agents, rebuilt.access), emptyRegistry());
+  await fs.writeFile(path.join(root, 'AGENTS.md'), original);
+  await applyPlan(await buildApplyPlan(await loadWorkspaceForReconfiguration(root), options));
+  assert.equal(await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8'), original);
+  await assert.rejects(fs.stat(path.join(root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
 });
 
-test('Known references are replaced without removing any byte from the user suffix', () => {
+test('Known references are detached without removing any byte from the user suffix or changing the old sidecar', async (t) => {
+  const { root } = await fixture(t);
   const initial = writeAccessFiles('# User instructions\n\nLast line without newline', null, emptyRegistry());
-  const rebuilt = writeReconfiguredAccessFiles(initial.agents, emptyRegistry());
-  assert.equal(rebuilt.agents, initial.agents);
-  assert.equal(rebuilt.access, initial.access);
+  await fs.mkdir(path.join(root, '.agentscope'));
+  await fs.writeFile(path.join(root, 'AGENTS.md'), initial.agents);
+  await fs.writeFile(path.join(root, ACCESS_POLICY_FILE), initial.access);
+  const state = await loadWorkspaceForReconfiguration(root);
+  await applyPlan(await buildApplyPlan(state, options));
+  const expected = initial.agents.slice(initial.agents.indexOf(end) + end.length);
+  assert.equal(await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8'), expected);
+  assert.equal(await fs.readFile(path.join(root, ACCESS_POLICY_FILE), 'utf8'), initial.access);
+  assert.deepEqual(readScopeConfiguration(await fs.readFile(path.join(root, SCOPE_CONFIGURATION_FILE), 'utf8')), state.registry);
 });
 
 test('Two missing policy files produce a disabled fresh workspace project without filesystem writes', async (t) => {
@@ -111,7 +122,7 @@ test('Healthy sidecar registration survives a corrupted main policy, without res
   assert.equal(state.files?.[path.join(root, ACCESS_POLICY_FILE)], saved.access);
 });
 
-test('Repair Apply grants exactly the newly checked leaf and retains conflicting main prose and JSON', async (t) => {
+test('Repair Apply grants exactly the newly checked leaf and retains conflicting main prose and the old sidecar', async (t) => {
   const { root } = await fixture(t);
   await fs.mkdir(path.join(root, 'project'));
   await fs.writeFile(path.join(root, 'project', 'chosen.md'), 'Chosen\n');
@@ -126,10 +137,12 @@ test('Repair Apply grants exactly the newly checked leaf and retains conflicting
   state.registry.submodules.project = await togglePathSelection(state.registry.submodules.project, 'chosen.md', 'write', true,
     async () => [{ relative: 'chosen.md', directory: false }, { relative: 'untouched.md', directory: false }]);
   const plan = await buildApplyPlan(state, options);
-  assert.equal(plan.changes.find(change => change.path === path.join(root, ACCESS_POLICY_FILE))?.before, corruptAccess);
+  assert.ok(!plan.changes.some(change => change.path === path.join(root, ACCESS_POLICY_FILE)));
+  assert.equal(plan.changes.find(change => change.path === path.join(root, SCOPE_CONFIGURATION_FILE))?.before, null);
   await applyPlan(plan);
   const main = await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8');
-  assert.ok(main.endsWith(original));
+  assert.equal(main, original);
+  assert.equal(await fs.readFile(path.join(root, ACCESS_POLICY_FILE), 'utf8'), corruptAccess);
   const loaded = await loadWorkspace(root);
   assert.deepEqual(loaded.registry.submodules.project, project({ read_paths: [], write_paths: ['chosen.md'] }));
   assert.deepEqual(loaded.registry.shared_resources, { read_paths: [], write_paths: [] });
@@ -218,4 +231,49 @@ test('Fresh access reconfiguration discovers ordinary sibling projects without o
   await assert.rejects(fs.stat(path.join(root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
   await applyPlan(await buildApplyPlan(state, options));
   assert.deepEqual((await loadWorkspace(root)).registry, state.registry);
+});
+
+test('New editor configuration supplies repair registration and leaves all old grants disabled', async (t) => {
+  const { root } = await fixture(t);
+  const saved = registry();
+  await fs.mkdir(path.join(root, '.vscode'));
+  await fs.writeFile(path.join(root, SCOPE_CONFIGURATION_FILE), writeScopeConfiguration(null, saved));
+  await fs.writeFile(path.join(root, 'AGENTS.md'), 'Unclosed legacy controls are irrelevant after migration.\n<!-- BEGIN AgentScope access reference -->\n');
+  const state = await loadWorkspaceForReconfiguration(root);
+  assert.deepEqual(state.registry.submodules.project, project({ enabled: false, read_paths: [], write_paths: [] }));
+  assert.deepEqual(state.registry.shared_resources, { read_paths: [], write_paths: [] });
+  await applyPlan(await buildApplyPlan(state, options));
+  assert.deepEqual((await loadWorkspace(root)).registry, state.registry);
+});
+
+test('Repair can replace malformed editor configuration and Restore recovers its exact bytes', async (t) => {
+  const { root } = await fixture(t);
+  await fs.mkdir(path.join(root, '.vscode'));
+  const target = path.join(root, SCOPE_CONFIGURATION_FILE);
+  const malformed = '// Keep this damaged state for Restore\n{"version":1,"registry":BROKEN}\n';
+  await fs.writeFile(target, malformed);
+  await assert.rejects(loadWorkspace(root), /invalid JSON/);
+  const state = await loadWorkspaceForReconfiguration(root, registry());
+  const plan = await buildApplyPlan(state, options);
+  assert.equal(plan.changes.find(change => change.path === target)?.before, malformed);
+  await applyPlan(plan);
+  assert.equal((await loadWorkspace(root)).registry.submodules.project.enabled, false);
+  await assert.rejects(fs.stat(path.join(root, 'AGENTS.md')), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+  await restoreChanges(plan.changes);
+  assert.equal(await fs.readFile(target, 'utf8'), malformed);
+});
+
+test('Concurrent editor-state changes stop reconfiguration before any write', async (t) => {
+  const { root } = await fixture(t);
+  await fs.mkdir(path.join(root, '.vscode'));
+  const target = path.join(root, SCOPE_CONFIGURATION_FILE);
+  const original = writeScopeConfiguration(null, registry());
+  await fs.writeFile(target, original);
+  const plan = await buildApplyPlan(await loadWorkspaceForReconfiguration(root), options);
+  const competing = original + '// A competing editor changed this state.\n';
+  await fs.writeFile(target, competing);
+  await assert.rejects(applyPlan(plan), /changed|conflict/i);
+  assert.equal(await fs.readFile(target, 'utf8'), competing);
+  await assert.rejects(fs.stat(path.join(root, 'AGENTS.md')), { code: 'ENOENT' });
 });

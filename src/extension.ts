@@ -14,6 +14,9 @@ import { readPresets, writePreset, deletePreset, ScopePreset } from './presets';
 import { ScopeView, ScopeViewModel, PermissionRow } from './scopeView';
 import { ApplyPlan, FileChange, WorkspaceState } from './types';
 import { CodexFilesystemMode, CodexRuntime, resolveFilesystemMode, runtimeWorkspaceRoot } from './core/runtimePaths';
+import { readScopeConfiguration, SCOPE_CONFIGURATION_FILE } from './configuration';
+import { chooseAndOpenScopedChat } from './chatEntry';
+import { detectWindowsSandbox } from './windowsSandbox';
 
 type ScopeNode = { kind: 'module'; name: string };
 
@@ -44,6 +47,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let loading = false;
   let messageQueue = Promise.resolve();
   let selectingPaths = false;
+  let startingChat = false;
   let selectedPreset: string | null = null;
   let presetOptions: ApplyOptions | undefined;
 
@@ -54,7 +58,7 @@ export function activate(context: vscode.ExtensionContext): void {
       name, relative, label: project ? name : path.posix.basename(relative), directory, project, symbolicLink,
       read: selection?.read ?? selectedState(module, relative, 'read'), write: selection?.write ?? selectedState(module, relative, 'write'),
       ...(project ? {
-        enabled: module.enabled, hidden: state().hidden[name] === true, instruction: module.instruction_file,
+        enabled: module.enabled, hidden: state().hidden[name] === true,
         scope: { path: module.path, enabled: module.enabled, restrict_paths: module.restrict_paths,
           read_paths: [...module.read_paths], write_paths: [...module.write_paths], instruction_file: module.instruction_file },
       } : {}),
@@ -87,7 +91,7 @@ export function activate(context: vscode.ExtensionContext): void {
     return {
       workspaceId, workspace: selectedRoot ? path.basename(selectedRoot) || selectedRoot : null,
       caseSensitive: process.platform !== 'win32', trusted: vscode.workspace.isTrusted,
-      busy: writing || loading || selectingPaths, dirty: currentState?.dirty === true,
+      busy: writing || loading || selectingPaths || startingChat, dirty: currentState?.dirty === true,
       configurationError,
       recoveryAvailable: !!recoveryCheckpoint && recoveryCheckpoint.root === selectedRoot,
       restoreAvailable,
@@ -101,6 +105,7 @@ export function activate(context: vscode.ExtensionContext): void {
       resourceHidden: currentState?.resourceHidden ?? {},
       preset: selectedPreset,
       scopeNotice: scopeNotice(),
+      promptPresetForNewChat: !!currentState && vscode.workspace.getConfiguration('agentscope', vscode.Uri.file(currentState.root)).get<boolean>('promptPresetForNewChat', false),
     };
   }
 
@@ -114,7 +119,8 @@ export function activate(context: vscode.ExtensionContext): void {
     } else { status.hide(); }
   }
 
-  function trusted(): void {
+  function trusted(allowStartingChat = false): void {
+    if (startingChat && allowStartingChat !== true) throw new Error('Wait for the new Codex chat operation to finish.');
     if (loading) { throw new Error('Wait for the workspace to finish loading before editing scopes.'); }
     if (writing) { throw new Error('Wait for the current configuration operation to finish before editing scopes.'); }
     if (selectingPaths) { throw new Error('Wait for the current path selection to finish.'); }
@@ -138,7 +144,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   function configurationChanged(root: string): void {
     if (disposed) return;
-    if (writing || loading || selectingPaths) { queuedReloadRoot = root; return; }
+    if (writing || loading || selectingPaths || startingChat) { queuedReloadRoot = root; return; }
     if (currentState?.dirty) {
       const warning = 'Workspace configuration changed outside AgentScope. Refresh before applying.';
       if (!currentState.warnings.includes(warning)) currentState.warnings.push(warning);
@@ -151,7 +157,7 @@ export function activate(context: vscode.ExtensionContext): void {
     for (const watcher of watchers) watcher.dispose();
     watchedWorkspaceRoot = root;
     queuedReloadRoot = undefined;
-    watchers = ['AGENTS.md', ACCESS_POLICY_FILE, '.gitmodules', '.vscode/settings.json', '.codex/config.toml'].map(file => {
+    watchers = [SCOPE_CONFIGURATION_FILE, '.vscode/agentscope-presets.json', '.gitmodules', '.vscode/settings.json', '.codex/config.toml'].map(file => {
       const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, file));
       const changed = () => { if (watchedWorkspaceRoot === root) configurationChanged(root); };
       watcher.onDidChange(changed); watcher.onDidCreate(changed); watcher.onDidDelete(changed);
@@ -176,7 +182,7 @@ export function activate(context: vscode.ExtensionContext): void {
   async function rememberCheckpoint(current: WorkspaceState): Promise<void> {
     const checkpoint = createCheckpoint(current);
     if (!checkpoint) return;
-    if (recoveryCheckpoint?.root === checkpoint.root && recoveryCheckpoint.agents === checkpoint.agents && recoveryCheckpoint.access === checkpoint.access) return;
+    if (recoveryCheckpoint?.root === checkpoint.root && recoveryCheckpoint.configuration === checkpoint.configuration) return;
     await context.globalState.update(checkpointKey(current.root), checkpoint);
     recoveryCheckpoint = checkpoint;
   }
@@ -204,7 +210,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   function drainDeferredChanges(): void {
-    if (disposed || writing || loading || selectingPaths) return;
+    if (disposed || writing || loading || selectingPaths || startingChat) return;
     if (queuedWorkspaceReconciliation) {
       queuedWorkspaceReconciliation = false;
       reconcileWorkspaceFolders();
@@ -382,32 +388,6 @@ export function activate(context: vscode.ExtensionContext): void {
     draft();
   }
 
-  async function instruction(name: string): Promise<void> {
-    const current = state();
-    const module = current.registry.submodules[name];
-    const action = await vscode.window.showQuickPick(['Select instruction file', 'Clear selection'], {
-      title: `${name}: Specialized instruction`, placeHolder: module.instruction_file ?? 'No extra workflow selected',
-    });
-    if (!action) { return; }
-    ensureWorkspace(current);
-    if (action === 'Clear selection') { module.instruction_file = null; draft(); return; }
-    const chosen = await vscode.window.showOpenDialog({ canSelectFiles: true, canSelectFolders: false,
-      canSelectMany: false, defaultUri: vscode.Uri.file(current.root), openLabel: 'Select instruction' });
-    if (!chosen?.length) { return; }
-    ensureWorkspace(current);
-    const relative = normalizeRelative(path.relative(current.root, chosen[0].fsPath));
-    const absolute = resolveContained(current.root, relative);
-    await verifyContained(current.root, absolute);
-    const previous = module.instruction_file;
-    module.instruction_file = relative;
-    try { validateRegistry(current.registry, current.root); }
-    catch (error) {
-      module.instruction_file = previous;
-      throw new Error(`The selected instruction needs read access first. Add its containing project or a shared read path, then select it. ${errorMessage(error)}`);
-    }
-    draft();
-  }
-
   async function configure(node?: ScopeNode): Promise<void> {
     trusted();
     const current = state();
@@ -423,7 +403,6 @@ export function activate(context: vscode.ExtensionContext): void {
           { label: 'Agent access', id: 'access', description: module.enabled ? 'Enabled' : 'Disabled' },
           { label: 'Read paths', id: 'read', description: module.read_paths.join(', ') || 'None' },
           { label: 'Write paths', id: 'write', description: module.write_paths.join(', ') || 'None' },
-          { label: 'Specialized instruction', id: 'instruction', description: module.instruction_file ?? 'None' },
           { label: 'Folder visibility', id: 'visibility', description: state().hidden[name] ? 'Hidden' : 'Visible' },
           { label: 'Done', id: 'done' },
         ], { title: `AgentScope: ${name}` });
@@ -432,7 +411,6 @@ export function activate(context: vscode.ExtensionContext): void {
         if (action.id === 'access') { await accessMode(name); }
         else if (action.id === 'read') { await editPaths(name, 'read_paths'); }
         else if (action.id === 'write') { await editPaths(name, 'write_paths'); }
-        else if (action.id === 'instruction') { await instruction(name); }
         else {
           if (module.path === '.') { throw new Error('The open workspace root cannot be hidden. Manage visibility for its child projects instead.'); }
           state().hidden[name] = !state().hidden[name]; draft();
@@ -514,6 +492,7 @@ export function activate(context: vscode.ExtensionContext): void {
       codexRuntime: config.get<CodexRuntime>('codexRuntime', 'auto'),
       codexWorkspaceRoot: config.get<string>('codexWorkspaceRoot', ''),
       codexFilesystemMode: config.get<CodexFilesystemMode>('codexFilesystemMode', 'auto'),
+      codexWindowsSandbox: config.get<'auto' | 'mxc' | 'legacy'>('codexWindowsSandbox', 'auto'),
     };
   }
 
@@ -529,6 +508,7 @@ export function activate(context: vscode.ExtensionContext): void {
     return {
       ...options,
       codexRuntime: (options.codexRuntime ?? 'auto') === 'auto' && runInWsl ? 'wsl' : options.codexRuntime,
+      codexAutoRuntime: runInWsl ? 'wsl' : 'native',
     };
   }
 
@@ -539,7 +519,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!options.generateCodexProfile) return undefined;
       const runtimeRoot = runtimeWorkspaceRoot(currentState.root, options.codexRuntime, options.codexWorkspaceRoot);
       if (resolveFilesystemMode(runtimeRoot, options.codexFilesystemMode) === 'windows-compatible') {
-        return 'Windows compatibility: files outside selected paths, including disabled projects, remain readable. Writes stay limited to selected paths; Read choices remain agent instructions. For read isolation, use WSL2 or Strict with a compatible native sandbox.';
+        return 'Native Windows: Apply verifies MXC support and uses strict isolation when available. The legacy fallback permits reads outside selected paths, including disabled projects; writes remain restricted. Preview shows the selected backend.';
       }
       if (resolveFilesystemMode(runtimeRoot) === 'windows-compatible') {
         return 'Strict read isolation on Windows requires a compatible sandbox such as MXC. Legacy Windows sandboxes may refuse to start; use Auto for Windows compatibility or run Codex in WSL2.';
@@ -551,7 +531,13 @@ export function activate(context: vscode.ExtensionContext): void {
   async function plan(options = resolvedOptions()): Promise<ApplyPlan> {
     const current = state();
     await ensureWritableWorkspace(current);
-    const result = await buildApplyPlan(current, options);
+    const codexExtension = vscode.extensions?.getExtension('openai.chatgpt');
+    const executable = process.platform === 'win32' && codexExtension
+      ? path.join(codexExtension.extensionPath, 'bin', process.arch === 'arm64' ? 'windows-aarch64' : 'windows-x86_64', 'codex.exe') : undefined;
+    const result = await buildApplyPlan(current, options, {
+      detectWindowsSandbox: input => detectWindowsSandbox({ ...input, codexExecutable: executable }),
+      presetDefaults: { ...configuredOptions(), codexAutoRuntime: options.codexAutoRuntime },
+    });
     ensureWorkspace(current);
     assertSavedDocuments(result);
     return result;
@@ -576,7 +562,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   async function preview(result?: ApplyPlan): Promise<void> {
-    if (!result && (writing || selectingPaths || loading)) throw new Error('Wait for the current configuration operation before previewing changes.');
+    if (!result && (writing || selectingPaths || loading || startingChat)) throw new Error('Wait for the current configuration operation before previewing changes.');
     const workspace = state();
     const ownsLock = !writing;
     if (ownsLock) { selectingPaths = true; update(); }
@@ -588,7 +574,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       const details: Record<string, string> = {
         'AGENTS.md': 'Agent instructions and the reference to the access policy.',
-        [ACCESS_POLICY_FILE]: 'Project and workspace Read/Write permissions and selected instruction files.',
+        [SCOPE_CONFIGURATION_FILE]: 'AgentScope editor selections; runtime enforcement is in Codex config.toml.',
         '.vscode/settings.json': 'Explorer and Search visibility settings.',
         '.codex/config.toml': 'The generated Codex filesystem and network permission profile.',
       };
@@ -607,18 +593,18 @@ export function activate(context: vscode.ExtensionContext): void {
     } finally { if (ownsLock) finishPathSelection(); }
   }
 
-  async function apply(): Promise<void> {
-    trusted();
+  async function apply(allowStartingChat = false): Promise<void> {
+    trusted(allowStartingChat);
     const current = state();
     writing = true; update();
     try {
       const optionsSnapshot = resolvedOptions();
-      const optionsBefore = JSON.stringify(optionsSnapshot);
+      const optionsBefore = JSON.stringify({ options: optionsSnapshot, defaults: configuredOptions() });
       const result = await plan(optionsSnapshot);
       const validateWrite = async () => {
         await ensureWritableWorkspace(current);
         assertSavedDocuments(result);
-        if (JSON.stringify(resolvedOptions()) !== optionsBefore) {
+        if (JSON.stringify({ options: resolvedOptions(), defaults: configuredOptions() }) !== optionsBefore) {
           throw new Error('Codex runtime or AgentScope settings changed. Preview the updated configuration before applying again.');
         }
       };
@@ -747,7 +733,7 @@ export function activate(context: vscode.ExtensionContext): void {
     ensureWorkspaceOpen(root);
     selectingPaths = true; update();
     try {
-      const registrations = recoveryCheckpoint ? readAccessRegistry(recoveryCheckpoint.agents, recoveryCheckpoint.access) ?? undefined : undefined;
+      const registrations = recoveryCheckpoint ? readScopeConfiguration(recoveryCheckpoint.configuration, root) : undefined;
       const fresh = await loadWorkspaceForReconfiguration(root, registrations);
       ensureWorkspaceOpen(root);
       currentState = fresh; selectedWorkspaceRoot = fresh.root;
@@ -820,7 +806,7 @@ export function activate(context: vscode.ExtensionContext): void {
     assertPresetSaved(current.root);
     writing = true; update();
     try {
-      const name = await vscode.window.showInputBox({ title: 'AgentScope: Save preset', prompt: 'Name this access, instruction and visibility configuration.',
+      const name = await vscode.window.showInputBox({ title: 'AgentScope: Save preset', prompt: 'Name this access and visibility configuration.',
         value: selectedPreset ?? '', validateInput: value => !value.trim() || value.trim().length > 80 || /[\x00-\x1f\x7f]/.test(value) || ['__proto__', 'constructor', 'prototype'].includes(value.trim()) ? 'Use a name of 1–80 characters without control characters.' : undefined });
       if (!name?.trim()) return;
       await ensureWritableWorkspace(current);
@@ -833,7 +819,9 @@ export function activate(context: vscode.ExtensionContext): void {
         resourceHidden: current.resourceHidden ?? {}, options: effectiveOptions() });
       await validatePresetWrite(current);
       await writePreset(current.root, name.trim(), snapshot, () => validatePresetWrite(current));
+      if (current.files) delete current.files[resolveContained(current.root, '.vscode/agentscope-presets.json')];
       selectedPreset = name.trim();
+      current.dirty = true;
       vscode.window.showInformationMessage(`AgentScope: Preset “${selectedPreset}” saved. Apply saves any pending scope changes.`);
     } finally { finishWriting(); }
   }
@@ -856,6 +844,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       await ensureWritableWorkspace(current);
       const saved = structuredClone(store.presets[name]);
+      for (const module of Object.values(saved.registry.submodules)) module.instruction_file = null;
       // Newly registered projects stay disabled until the user deliberately includes them in a preset.
       for (const [projectName, module] of Object.entries(current.registry.submodules)) {
         if (!Object.hasOwn(saved.registry.submodules, projectName)) {
@@ -897,13 +886,85 @@ export function activate(context: vscode.ExtensionContext): void {
       if (confirmed !== 'Delete') return;
       await validatePresetWrite(current);
       await deletePreset(current.root, name, () => validatePresetWrite(current));
+      if (current.files) delete current.files[resolveContained(current.root, '.vscode/agentscope-presets.json')];
       if (selectedPreset === name) selectedPreset = null;
+      current.dirty = true;
       vscode.window.showInformationMessage(`AgentScope: Preset “${name}” deleted.`);
     } finally { finishWriting(); }
   }
 
+  async function toggleNewChatPresetPrompt(): Promise<void> {
+    trusted();
+    const current = state();
+    const config = vscode.workspace.getConfiguration('agentscope', vscode.Uri.file(current.root));
+    await ensureWritableWorkspace(current);
+    await config.update('promptPresetForNewChat', !config.get<boolean>('promptPresetForNewChat', false), vscode.ConfigurationTarget.WorkspaceFolder);
+    update();
+  }
+
+  async function newChat(): Promise<void> {
+    trusted();
+    const current = state();
+    startingChat = true; update();
+    try {
+    const config = vscode.workspace.getConfiguration('agentscope', vscode.Uri.file(current.root));
+    if (!config.get<boolean>('promptPresetForNewChat', false)) {
+      await vscode.commands.executeCommand('chatgpt.newChat'); return;
+    }
+    // The public Codex command ignores profile arguments. Never change a global
+    // default and claim that the new conversation was bound to that profile.
+    let prepared: ApplyPlan;
+    selectingPaths = true; update();
+    try { prepared = await plan(); }
+    finally { finishPathSelection(); }
+    const options = resolvedOptions();
+    const targetRoot = runtimeWorkspaceRoot(current.root, options.codexRuntime, options.codexWorkspaceRoot);
+    const nativeWindows = (root: string) => /^(?:[A-Za-z]:[\\/]|[\\/]{2})/.test(root);
+    const profiles = (prepared.exportedProfiles ?? []).filter(profile => !profile.runtimeRoot || nativeWindows(profile.runtimeRoot) === nativeWindows(targetRoot));
+    if (!profiles.length) throw new Error('Save a preset with Codex profile generation enabled for the current native/WSL runtime before starting a scoped chat.');
+    let chosen: { name: string; profileName: string } | undefined;
+    let verifiedPlan: ApplyPlan | undefined;
+    await chooseAndOpenScopedChat(profiles.map(profile => ({ name: profile.presetName, profileName: profile.profileName })), {
+      choose: async entries => {
+        selectingPaths = true; update();
+        try {
+          const selected = await vscode.window.showQuickPick(entries.map(entry => ({ label: entry.name,
+            description: profiles.find(profile => profile.profileName === entry.profileName)?.description, entry })), {
+            title: 'AgentScope: Preset for new Codex chat', placeHolder: 'Select the matching entry in Codex Permissions before sending your first message.',
+          });
+          ensureWorkspace(current); chosen = selected?.entry; return chosen;
+        } finally { finishPathSelection(); }
+      },
+      publish: async () => {
+        ensureWorkspace(current);
+        const latest = await plan();
+        if (!latest.exportedProfiles?.some(profile => profile.profileName === chosen?.profileName)) throw new Error('The chosen preset changed. Choose it again.');
+        if (latest.changes.length) await apply(true);
+        const verified = await plan();
+        if (verified.changes.length) {
+          throw new Error('Apply the exported permission profiles before starting this chat.');
+        }
+        if (!verified.exportedProfiles?.some(profile => profile.profileName === chosen?.profileName)) throw new Error('The chosen preset changed. Choose it again.');
+        verifiedPlan = verified;
+      },
+      open: async () => {
+        if (!verifiedPlan) throw new Error('Verify the chosen preset before opening a chat.');
+        await applyPlan(verifiedPlan, async () => {
+          if (!sameConfigurationPath(state().root, current.root)) throw new Error('The selected workspace changed. Choose the preset again.');
+          await ensureWritableWorkspace(state()); assertSavedDocuments(verifiedPlan!);
+        });
+        await vscode.commands.executeCommand('chatgpt.newChat');
+      },
+      guide: async entry => {
+        const profile = profiles.find(item => item.profileName === entry.profileName)!;
+        void vscode.window.showInformationMessage(`AgentScope: Use workspace “${path.basename(current.root)}” in Codex and, before sending, select “${profile.description}” in Permissions. Codex's public new-chat command cannot select the workspace or profile automatically; its current remembered choice may differ.`);
+      },
+    });
+    } finally { startingChat = false; update(); drainDeferredChanges(); }
+  }
+
   async function refresh(): Promise<void> {
-    if (selectingPaths || writing || loading) { throw new Error('Wait for the current configuration operation before refreshing.'); }
+    if (selectingPaths || writing || loading || startingChat) { throw new Error('Wait for the current configuration operation before refreshing.'); }
     if (currentState?.dirty) {
       const discard = await vscode.window.showWarningMessage('Discard the pending AgentScope draft and reload configuration?', 'Discard draft');
       if (discard !== 'Discard draft') { return; }
@@ -912,7 +973,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   async function selectWorkspace(): Promise<void> {
-    if (selectingPaths || writing || loading) { throw new Error('Wait for the current configuration operation before switching workspaces.'); }
+    if (selectingPaths || writing || loading || startingChat) { throw new Error('Wait for the current configuration operation before switching workspaces.'); }
     if (currentState?.dirty) {
       const discard = await vscode.window.showWarningMessage('Discard the current draft before switching workspace folders?', 'Discard draft');
       if (discard !== 'Discard draft') { return; }
@@ -941,7 +1002,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!currentState) {
         const recoveryCommand = typeof message.command === 'string' ? message.command : undefined;
         const recovery = recoveryCommand === 'refresh' || recoveryCommand === 'selectWorkspace' ||
-          (selectedWorkspaceRoot && recoveryCommand && ['openAgents', 'openAccess', 'openCodex', 'restore', 'recover', 'reconfigure'].includes(recoveryCommand));
+          (selectedWorkspaceRoot && recoveryCommand && ['openConfiguration', 'openCodex', 'restore', 'recover', 'reconfigure'].includes(recoveryCommand));
         if (message.type === 'command' && message.name === undefined && message.target === undefined && recoveryCommand && recovery) {
           await actions[recoveryCommand](); update(); return;
         }
@@ -957,7 +1018,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         if (message.target === 'resource') { throw new Error('Use a workspace resource action for this target.'); }
         const allowed = ['refresh', 'apply', 'preview', 'addFolder', 'selectWorkspace', 'configure',
-          'toggleVisibility', 'toggleAccess', 'sharedPaths', 'restore', 'recover', 'reconfigure', 'openAgents', 'openAccess', 'openCodex', 'removeProject', 'savePreset', 'activatePreset', 'deletePreset'];
+          'toggleVisibility', 'toggleAccess', 'sharedPaths', 'restore', 'recover', 'reconfigure', 'openConfiguration', 'openCodex', 'removeProject', 'savePreset', 'activatePreset', 'deletePreset', 'newChat', 'toggleNewChatPresetPrompt'];
         if (typeof message.command !== 'string' || !allowed.includes(message.command)) {
           throw new Error('Unknown scope panel command.');
         }
@@ -1071,7 +1132,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const actions: Record<string, (...args: any[]) => Promise<unknown>> = {
     refresh, selectWorkspace, addFolder, configure, preview: () => preview(), apply, restore, recover, reconfigure, sharedPaths,
-    savePreset, activatePreset, deletePreset: removePreset,
+    savePreset, activatePreset, deletePreset: removePreset, newChat, toggleNewChatPresetPrompt,
     toggleVisibility: (node?: ScopeNode) => changeProject(node, (current, name) => {
       if (current.registry.submodules[name].path === '.') throw new Error('The open workspace root cannot be hidden. Manage visibility for its child projects instead.');
       current.hidden[name] = !current.hidden[name];
@@ -1079,8 +1140,7 @@ export function activate(context: vscode.ExtensionContext): void {
     toggleAccess: (node?: ScopeNode) => changeProject(node, (current, name) => {
       current.registry.submodules[name].enabled = !current.registry.submodules[name].enabled;
     }),
-    openAgents: () => openConfiguration('AGENTS.md'),
-    openAccess: () => openConfiguration(ACCESS_POLICY_FILE),
+    openConfiguration: () => openConfiguration(SCOPE_CONFIGURATION_FILE),
     openCodex: () => openConfiguration('.codex/config.toml'),
     removeProject: (node?: ScopeNode) => changeProject(node, (current, name) => {
       delete current.registry.submodules[name]; delete current.hidden[name];
@@ -1122,9 +1182,9 @@ function sameConfigurationPath(first: string, second: string): boolean {
 }
 
 function undoBackup(root: string, value: unknown): FileChange[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 4) throw new Error('No valid Restore backup is available for this workspace.');
+  if (!Array.isArray(value) || value.length < 1 || value.length > 5) throw new Error('No valid Restore backup is available for this workspace.');
   const key = (target: string) => process.platform === 'win32' ? target.toLowerCase() : target;
-  const allowed = new Set(['AGENTS.md', ACCESS_POLICY_FILE, '.vscode/settings.json', '.codex/config.toml'].map(relative => key(resolveContained(root, relative))));
+  const allowed = new Set(['AGENTS.md', ACCESS_POLICY_FILE, SCOPE_CONFIGURATION_FILE, '.vscode/settings.json', '.codex/config.toml'].map(relative => key(resolveContained(root, relative))));
   const seen = new Set<string>();
   return value.map(change => {
     if (!change || typeof change !== 'object' || Array.isArray(change) || Object.keys(change).length !== 3 ||

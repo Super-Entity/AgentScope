@@ -3,87 +3,102 @@
   &nbsp;&nbsp;&nbsp;AgentScope
 </h1>
 
-
-Manage Read and Write access, project instructions and Explorer visibility from a single VS Code panel. AgentScope works with local folders, Git submodules and multi-root workspaces on Windows, macOS and Linux, including VS Code running in WSL.
+Manage Codex filesystem permissions and Explorer visibility from one VS Code panel. Save project presets and select their permission profiles for individual Codex chats. AgentScope supports local folders, Git submodules and multi-root workspaces on Windows, macOS and Linux, including WSL.
 
 ## Features
 
 - Select projects, folders or individual files with separate Read and Write checkboxes.
-- Manage workspace files outside registered projects without enabling those projects.
-- Choose an additional instruction file for each project.
-- Hide folders in Explorer and Search independently of access permissions.
-- Save named presets and switch between them.
-- Preview configuration changes before applying them, and restore the previous configuration.
-- Recover saved policies after deletion or corruption, or start a fresh access configuration.
+- Select supporting workspace files outside registered projects.
+- Hide folders in Explorer and Search independently of permissions.
+- Export saved presets as separate named Codex permission profiles.
+- Choose a preset before opening a chat through AgentScope, with an optional Ctrl+N shortcut.
+- Preview changes, restore the last Apply and recover saved configuration.
+- Verify MXC support for native Windows and use strict filesystem permissions when available.
 
 ## Install
 
-Install [AgentScope from the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=SuperEntity.agentscope). In VS Code's Extensions view, search for `AgentScope`, choose the extension published by **SuperEntity**, and select **Install**. Marketplace installations update automatically when Auto Update is enabled.
+Install [AgentScope from the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=SuperEntity.agentscope), published by **SuperEntity**. Marketplace installations update automatically when Auto Update is enabled.
 
-You can also download a VSIX from [GitHub Releases](https://github.com/Super-Entity/AgentScope/releases). You do not need Node.js or npm to install or use it.
-
-1. Open a release and download the file ending in `.vsix` from **Assets**.
-2. In VS Code, open the Command Palette and run **Extensions: Install from VSIX…**.
-3. Select the downloaded file and reload the window if prompted.
-
-VS Code 1.95 or later is required. To update a VSIX installation, download a newer package and install it the same way.
-
-You can also install from the folder containing the downloaded package with VS Code's CLI:
+Alternatively, download a `.vsix` from [GitHub Releases](https://github.com/Super-Entity/AgentScope/releases), then run **Extensions: Install from VSIX...** in VS Code. You do not need Node.js or npm to use the extension. VS Code 1.95 or later is required.
 
 ```sh
-code --install-extension agentscope-0.7.6.vsix
+code --install-extension agentscope-0.8.0.vsix
 ```
 
 ## Getting started
 
-1. Open a local workspace and select AgentScope in the Activity Bar. In a multi-root workspace, use **Select workspace** to choose the folder to configure.
-2. A new container workspace, such as a folder holding several apps, lists its immediate ordinary folders as disabled projects. Git submodules are discovered when `.gitmodules` exists. An individual Git repository or a folder with a project manifest starts with its own disabled root instead. Use **Add folder** to register one or more other workspace folders; Git is optional.
-3. Expand a project and check **Read** or **Write** for the paths it needs. A folder selection includes descendants; a mixed checkbox means only some paths are selected. Write also allows Read.
-4. Use **Workspace files** for supporting files outside registered projects. Its parent checkboxes select all currently available resources. Use **Hide/Show** to change visibility separately.
-5. Open **Preview**, choose a changed configuration file, and review the comparison. The current file is on the left; the proposed version is on the right.
-6. Select **Apply** to save the draft. Start a new agent session to load changes to its instructions or permission profile.
+1. Open a local workspace and select AgentScope in the Activity Bar. For multi-root workspaces, use **Select workspace** to choose the folder to configure.
+2. New container workspaces list immediate ordinary folders as disabled projects. Git submodules are discovered from `.gitmodules`. An individual repository or project starts with its own disabled root. Use **Add folder** to register other workspace folders; Git is optional.
+3. Expand a project and check **Read** or **Write** for the paths it needs. A folder includes its descendants; a mixed checkbox means only some paths are selected. Write also allows Read.
+4. Use **Workspace files** for supporting files outside registered projects. Use **Hide/Show** to change visibility separately.
+5. Save useful selections with **Presets → Save preset...**. Use **Preview** to review the proposed configuration, then **Apply** to publish it.
+6. In a new Codex chat, open the permissions menu and choose the current generated entry for the desired preset before sending a message.
 
-Hover over toolbar icons for their labels. Folder arrows expand individual rows; **Collapse all** folds the tree without changing selections.
+Installation, refresh and checkbox changes leave workspace configuration untouched. Access and visibility changes remain a draft until Apply; Save preset stores its snapshot immediately. Background configuration errors appear in the panel. Each selected folder in a multi-root workspace has its own configuration.
 
-For example, opening `MyApps` with `frontend/`, `backend/` and `docs/` lets you choose access for each folder independently. Opening a single project lets you expand its root and choose `src/`, `tests/` or individual files. Existing saved project registrations and access choices are preserved when you refresh.
+## Presets and individual chats
 
-Installation and automatic refresh leave workspace files untouched. Background configuration errors appear in the panel without popups. Applying access settings, reconfiguring or recovering a policy is your choice. Multi-root workspaces keep separate settings for each selected folder.
+Apply exports saved presets to separate entries in `.codex/config.toml`. Codex's native permissions menu displays labels such as **AgentScope: Review (revision)**, so two chats can select different project scopes without switching a shared instruction file. Selecting a profile applies to that chat; saving an AgentScope preset alone does not activate it in a running chat.
+
+Exported preset identifiers include a version derived from their effective permissions and runtime. Changing a preset publishes a new identifier and retains the previous profile, allowing chats already using that identifier to keep it. Deleting a saved preset also retains its exported profiles. Older versions can remain visible in Codex's menu; choose the current exported profile for a new chat.
+
+Retained identifiers preserve profile definitions; `windows.sandbox` remains a workspace-wide backend setting. After loading configuration that switches from MXC to a legacy backend, an older strict MXC profile may fail to start. Keep MXC selected for those profiles or choose a profile generated for the current runtime and backend.
+
+Run **AgentScope: New Codex chat** (`agentscope.newChat`) to open Codex. Enable `agentscope.promptPresetForNewChat` in Settings or toggle the preset prompt from the AgentScope menu to choose a saved preset first. This option also routes Ctrl+N through AgentScope while Codex's new-chat shortcut is active. Cancelling the picker opens no chat and publishes no changes.
+
+**After the chat opens, select the chosen profile in Codex's native permissions menu before sending.** Codex's public new-chat command does not accept a permission-profile argument. AgentScope cannot bind the selection automatically or intercept Codex's internal **+** button. Changing `default_permissions` is insufficient because Codex can remember a different menu selection. The picker and subsequent guidance make this manual step explicit.
+
+The chat must also use the workspace folder configured in AgentScope as its working directory. In a multi-root workspace, select that folder in Codex so it can discover the exported profiles. Codex's public new-chat command does not let AgentScope set the chat's working directory.
+
+Presets contain access, visibility and runtime options. Older presets inherit settings that were not present when they were saved. **Activate preset...** loads its choices into the editor for review and Apply.
 
 ## How selections work
 
-Checkbox changes remain in the draft until Apply. A project's **Enable/Disable** button retains its saved paths. Checking a path in a disabled project starts a fresh precise selection instead of restoring old grants. The row's **⋯** action opens manual path and instruction settings.
+A project's **Enable/Disable** button retains its saved paths. Checking a path in a disabled project starts a fresh precise selection. The row's **⋯** action opens manual path settings.
 
-Unchecking a child of a selected folder keeps its currently selected siblings. New siblings need their own selection; descendants of retained folders stay covered. Removing Read also removes Write. Removing Write keeps any separately selected Read access.
+Unchecking a child of a selected folder keeps its currently selected siblings. New siblings need their own selection; descendants of retained folders stay covered. Removing Read also removes Write. Removing Write keeps separately selected Read access.
 
-**Workspace files** excludes registered projects, including disabled ones, and does not save a whole-workspace `.` grant. Folders containing projects can be expanded to select other children. The parent checkbox selects current resource roots; new top-level entries need a new selection. A project registered at `.` uses its own tree, so the separate Workspace files section is omitted.
+**Workspace files** excludes registered projects, including disabled ones, and does not save a whole-workspace `.` grant. Folders containing projects can be expanded to select other children. Its parent checkbox selects current resource roots; new top-level entries need a new selection. A project registered at `.` uses its own tree instead.
 
-Selecting an instruction file requires existing Read access to it. Project Read/Write paths are relative to that project; instruction and shared-resource paths are relative to the selected workspace.
+Project Read/Write paths are relative to the project. Shared-resource paths are relative to the selected workspace. Explorer and Search visibility do not enforce filesystem permissions.
 
-## Configuration files
+## Configuration files and migration
 
 | File | Purpose |
 | --- | --- |
-| `.agentscope/access.md` | Access policy and project registry |
-| `AGENTS.md` | A short reference to the access policy alongside existing instructions |
+| `.vscode/agentscope.json` | AgentScope editor state and project registry |
+| `.vscode/agentscope-presets.json` | Named preset snapshots |
 | `.vscode/settings.json` | Explorer and Search visibility |
-| `.codex/config.toml` | Optional Codex permission profile |
-| `.vscode/agentscope-presets.json` | Named workspace presets |
+| `.codex/config.toml` | Codex runtime permission profiles and selected sandbox settings |
 
-Apply adds or updates its short reference in `AGENTS.md` and keeps your other instructions. If the file is missing, Apply creates it. Existing editor and Codex settings are preserved. Customized or conflicting policy blocks need review before Apply.
+Codex enforces the selected permission profile from `config.toml`; `.vscode/agentscope.json` is extension storage. AgentScope no longer generates or maintains `AGENTS.md`, `.agentscope/access.md` or project instruction-file references. Your own `AGENTS.md` can still supply optional instructions independently of AgentScope.
 
-Preview lists only files that would change and leaves them untouched. With no pending changes, it shows a message. **More → Restore last apply** restores the previous contents if those files still match the applied version.
+When no new editor-state file exists, AgentScope can import a recognized legacy configuration. The first Apply saves `.vscode/agentscope.json` and removes only recognized canonical AgentScope-generated blocks from an existing `AGENTS.md`. User prose remains, and the legacy `.agentscope/access.md` is left as a backup. Customized or ambiguous blocks require review instead of being deleted automatically. Later configuration uses the new state file and does not depend on the legacy policy pair.
 
-Save or discard unsaved configuration edits before applying changes. If a configuration file changes elsewhere, review the updated draft before trying again.
+Preview lists only files that would change and leaves them untouched. Existing JSONC comments, unrelated editor settings and user-owned Codex profiles are preserved. **Restore last apply** restores previous contents when the affected files still match the applied version.
 
-## Presets and recovery
+Save or discard unsaved configuration edits before Apply. If another writer changes a file, review the updated draft before trying again. **Recover saved configuration** restores a valid local checkpoint when available; **Reconfigure access** starts a fresh disabled draft. Neither runs automatically. Keep important configuration in version control or a separate backup.
 
-Use **Presets → Save preset…** to name and save your current choices. **Activate preset…** loads them for review and Apply. Saving or deleting a preset does not change the applied configuration.
+## Runtime and Windows sandbox
 
-AgentScope also keeps the last complete, valid policy pair in local VS Code extension storage. **More → Recover saved configuration** restores that pair after either policy file is deleted or damaged. Recovery replaces the files with the saved version and keeps their prior contents available through Restore.
+Auto runtime selection follows Codex's `chatgpt.runCodexInWindowsSubsystemForLinux` setting on Windows. A VS Code extension running inside WSL already uses Linux paths. For custom WSL mounts, set `codexWorkspaceRoot` to the workspace's absolute path inside that runtime, such as `/mnt/d/MyApps`.
 
-If a linked `.agentscope/access.md` is missing or damaged, the panel keeps the selected workspace and shows the error. **Recover saved configuration**, when available, restores the last valid policy; it is also available beside the error. To choose permissions again, use **Reconfigure access** beside the error or in More. It starts a draft with projects disabled and no Read/Write grants. Select the desired paths and Apply; existing `AGENTS.md` instructions are retained. Neither action runs automatically.
+| Codex runtime | Auto filesystem behavior |
+| --- | --- |
+| Native Windows with verified MXC | Strict selected reads and writes; pin the MXC backend |
+| Native Windows without verified MXC | Legacy Windows compatibility: broad reads and selected writes |
+| Windows VS Code with Codex in WSL2 | Strict selected reads and writes |
+| VS Code inside WSL, Linux or macOS | Strict selected reads and writes |
 
-Recovery is local to this VS Code installation and workspace path. Keep important configuration files in version control or a separate backup. Errors in unrelated editor settings still need to be repaired before Apply.
+Native Windows Auto mode checks version eligibility and runs a bounded Codex sandbox probe with MXC explicitly selected. A successful probe enables strict profiles and writes `[windows] sandbox = "mxc"` to the workspace Codex configuration. This avoids silently falling back to a legacy backend for profiles requiring restricted reads.
+
+MXC needs supported Windows 11 builds, Codex support and an available native capability; Windows 11 alone is insufficient. AgentScope's capability probe is decisive. See the [official Windows sandbox documentation](https://learn.chatgpt.com/docs/windows/windows-sandbox).
+
+When MXC cannot be verified, Auto uses Windows compatibility and explains the broad read access in the panel, profile and Apply confirmation. Files outside selected paths, including disabled projects, remain readable by local commands in this mode. Selected writes remain restricted. No generated instruction file adds read isolation to this fallback.
+
+Explicit **Strict** mode requires a compatible sandbox. **Windows-compatible** remains strict for POSIX runtime paths. Some legacy Windows backends cannot enforce writable descendants inside protected read-only paths or split write layouts; unsupported layouts need MXC or WSL2. AgentScope rejects known unsupported layouts without widening writes.
+
+After switching native/WSL runtimes or changing a runtime path, use **Preview → Apply**, then select the newly exported profile in a new session. Profiles contain runtime-specific paths; choose a version generated for the runtime actually running Codex.
 
 ## Settings
 
@@ -91,49 +106,28 @@ Search for `agentscope` in VS Code Settings.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `generateCodexProfile` | `true` | Generate a named Codex permission profile |
-| `profileName` | `agentscope` | Profile name |
-| `codexRuntime` | `auto` | Generate paths for the native OS or WSL; Auto follows Codex's WSL setting |
-| `codexWorkspaceRoot` | empty | Optional absolute workspace path inside the Codex runtime, for custom drive mounts |
-| `codexFilesystemMode` | `auto` | Windows compatibility for Windows runtime paths; strict read isolation for Linux, macOS and WSL |
+| `generateCodexProfile` | `true` | Export Codex permission profiles on Apply |
+| `profileName` | `agentscope` | Base profile for the current editor selections |
+| `codexRuntime` | `auto` | Target the native OS or WSL runtime |
+| `codexWorkspaceRoot` | empty | Override the absolute workspace path inside the Codex runtime |
+| `codexFilesystemMode` | `auto` | Verify native Windows MXC, fall back to Windows compatibility, or choose an explicit mode |
+| `promptPresetForNewChat` | `false` | Show saved presets before AgentScope opens a chat; also route Codex's Ctrl+N through this flow |
 | `excludeFromSearch` | `true` | Apply visibility choices to Search as well as Explorer |
-| `allowCommandNetwork` | `false` | Request command network access in the generated profile |
+| `allowCommandNetwork` | `false` | Request network access for local commands |
 
-Disable profile generation to manage policies and visibility without changing Codex configuration. Network settings concern local commands, not separate browsing or connector tools.
-
-Native Codex sessions keep the selected workspace's Windows, macOS or Linux paths. A VS Code extension running inside WSL already uses Linux paths; Windows VS Code can map the same workspace to its WSL location as described below.
-
-When VS Code runs on Windows and Codex runs in WSL, the profile needs Linux paths such as `/mnt/d/MyApps/.agentscope/access.md`. Auto detects `chatgpt.runCodexInWindowsSubsystemForLinux`; select `wsl` or `native` if needed. For a custom WSL mount, set `codexWorkspaceRoot` to the selected folder's Linux path. After changing the runtime or updating AgentScope, use **Preview → Apply** to regenerate its managed profile, then start a new Codex session.
-
-Filesystem compatibility follows the generated runtime paths, independently of the extension host:
-
-| Codex runtime | Auto filesystem mode | Sandbox boundary |
-| --- | --- | --- |
-| Native Windows, including Windows drive and UNC overrides | Windows compatibility | Broad reads; writes limited to selected paths and runtime temporary storage |
-| Windows VS Code with Codex in WSL2 | Strict | Selected reads and writes, plus minimal runtime/configuration paths |
-| VS Code inside WSL, Linux or macOS | Strict | Selected reads and writes, plus minimal runtime/configuration paths |
-
-Native legacy Windows sandboxes can refuse to start with restricted root reads, reporting `elevated Windows sandbox requires effective ':root' read access`. **Auto** avoids this by generating a Windows-compatible profile. The panel, generated profile and Apply confirmation explain that files outside selected paths, including disabled projects, remain readable at the OS level. Read selections still govern the agent's instructions, but do not enforce read isolation in this mode. Selected write permissions are retained; AgentScope does not disable the sandbox or grant whole-workspace writes.
-
-Use `codexFilesystemMode: strict` when Codex has a compatible native Windows sandbox such as MXC and you need OS-enforced read isolation. WSL2 uses strict mode automatically. Explicit `windows-compatible` remains strict when targeting POSIX paths, so presets can move between environments. Some legacy Windows backends cannot enforce writable descendants inside protected read-only carveouts or split write policies; unsupported layouts need a compatible sandbox or WSL2. AgentScope rejects known unsupported carveouts rather than widening writes.
-
-Existing presets without the new filesystem option inherit the current setting. Explicit runtime choices and workspace-root overrides saved in a preset remain authoritative; `auto` follows the current Codex WSL setting each time you Preview or Apply. Switching between native and WSL runtimes requires another **Preview → Apply** and a new Codex session. The extension marks configuration changes as a pending draft without writing files automatically. One shared generated profile targets one runtime at a time.
+Disable profile generation to save editor choices and visibility without exporting Codex permissions.
 
 ## Access boundaries
 
-Explorer exclusions hide paths; they do not restrict filesystem access. The policy describes the agent's expected behavior. A compatible Codex client must load and enforce the generated permission profile. Saving configuration does not confirm that a running session has activated it; check the client's effective permissions in a fresh session.
+A compatible Codex client must load the selected profile. These profiles control local commands; they do not scope independent remote tools, MCP servers, browsers or connectors. See [Codex permissions](https://learn.chatgpt.com/docs/permissions). Inspect the active profile in each chat before using it.
 
-Changing settings requires a trusted workspace. AgentScope checks that selected paths stay within their project, resolves symbolic links and junctions, and checks for competing configuration edits. It rejects explicit Git metadata selections. Malformed or unsupported `.gitmodules` input stops discovery.
+Configuration changes require a trusted workspace. AgentScope checks selected project boundaries, symbolic links, junctions and competing edits, and rejects explicit Git metadata selections. Malformed or unsupported `.gitmodules` input stops discovery.
 
-Folder grants cover descendants without inspecting every nested link or metadata directory. Hard links can expose the same file through two ordinary paths, so do not use them across an intended access boundary. Minimal configuration reads remain in generated profiles even when other resources are unchecked. Avoid concurrent configuration writers.
+Folder grants cover descendants without inspecting every nested link or metadata directory. Hard links can expose the same file through ordinary paths on both sides of an intended boundary. Generated profiles retain minimal runtime/configuration reads and temporary-storage allowances. Avoid concurrent configuration writers.
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) to build, test or contribute to AgentScope.
-
-The GitHub Actions workflow runs the test suite and builds the VSIX on Windows, macOS and Linux. WSL path translation also has dedicated unit tests.
-
-Webview performance tests count element creation, listener bindings and table changes alongside access and keyboard behavior. Repeated states reuse existing rows; loading one folder adds its children while keeping other rows and controls. Sidebar refreshes in the same turn publish the latest model once.
+See [CONTRIBUTING.md](CONTRIBUTING.md) to build, test or contribute. GitHub Actions runs the test suite and builds the VSIX on Windows, macOS and Linux. Tests cover WSL path translation, native sandbox detection, preset export, migration, configuration conflicts and webview behavior.
 
 ## License
 

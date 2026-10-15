@@ -92,6 +92,19 @@ test('Scope webview enables scripts with media-only resources and no command URI
   assert.deepEqual(view.webview.options.localResourceRoots?.map(uri => uri.fsPath), [path.join(extensionUri.fsPath, 'media')]);
 });
 
+test('Scope menu offers scoped chat controls and no instruction-policy editors', async (t) => {
+  const ScopeView = loadProvider(t);
+  const provider = new ScopeView(MockUri.file(path.join(process.cwd(), 'virtual-extension')), async () => undefined, initialModel);
+  t.after(() => { provider.dispose(); });
+  const view = mockView();
+  await provider.resolveWebviewView(view);
+  assert.match(view.webview.html, /data-command="newChat"/);
+  assert.match(view.webview.html, /data-command="toggleNewChatPresetPrompt"/);
+  assert.match(view.webview.html, /data-command="openConfiguration"/);
+  assert.doesNotMatch(view.webview.html, /data-command="(?:openAgents|openAccess)"/);
+  assert.doesNotMatch(view.webview.html, /Restore the last valid AGENTS\.md/);
+});
+
 test('Scope HTML uses a fresh nonce CSP, external webview assets and a default deny policy', async (t) => {
   const ScopeView = loadProvider(t);
   const extensionUri = MockUri.file(path.join(process.cwd(), 'virtual-extension'));

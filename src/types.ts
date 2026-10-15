@@ -24,6 +24,8 @@ export interface ProfileOptions {
   runtimeRoot?: string;
   filesystemMode?: CodexFilesystemMode;
   profileName: string;
+  /** Human-readable label shown by Codex's permission profile picker. */
+  description?: string;
   allowNetwork: boolean;
   /** Exact Git paths already resolved and verified to belong to enabled modules. */
   gitReadPaths?: string[];
@@ -39,6 +41,7 @@ export interface ApplyPlan {
   warnings: string[];
   /** Windows compatibility allows OS-level reads outside the selected paths. */
   broadReadAccess?: boolean;
+  exportedProfiles?: Array<{ presetName: string; profileName: string; description: string; broadReadAccess: boolean; runtimeRoot?: string }>;
   /** Read-only inputs whose contents must still match at apply time. */
   checks?: Array<{ path: string; expected: string | null }>;
   /** Scope targets rechecked before writing configuration. */

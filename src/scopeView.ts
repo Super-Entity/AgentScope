@@ -36,6 +36,7 @@ export interface ScopeViewModel {
   resourceHidden?: Record<string, boolean>;
   preset?: string | null;
   scopeNotice?: string;
+  promptPresetForNewChat?: boolean;
 }
 
 export class ScopeView implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -130,6 +131,8 @@ export class ScopeView implements vscode.WebviewViewProvider, vscode.Disposable 
       <details class="more presets">
         <summary class="icon-button" title="Manage saved workspace presets" aria-label="Manage saved workspace presets">${icon('<path d="M6 3h12v18l-6-4-6 4Z"/>')}<span class="sr-only">Presets</span></summary>
         <div class="more-actions">
+          <button data-command="newChat">New Codex chat…</button>
+          <button data-command="toggleNewChatPresetPrompt" id="new-chat-preset-prompt" role="menuitemcheckbox" aria-checked="false">Prompt for preset before new chat</button>
           <button data-command="savePreset">Save preset…</button>
           <button data-command="activatePreset">Activate preset…</button>
           <button data-command="deletePreset">Delete preset…</button>
@@ -139,11 +142,10 @@ export class ScopeView implements vscode.WebviewViewProvider, vscode.Disposable 
         <summary class="icon-button" title="More workspace actions" aria-label="More workspace actions">${icon('<circle cx="5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="19" cy="12" r="1" fill="currentColor"/>')}<span class="sr-only">More</span></summary>
         <div class="more-actions">
           <button data-command="sharedPaths">Workspace resources</button>
-          <button data-command="recover" title="Restore the last valid AGENTS.md and access policy">Recover saved configuration</button>
+          <button data-command="recover" title="Restore the last saved AgentScope selections">Recover saved configuration</button>
           <button data-command="reconfigure" title="Start fresh Read and Write selections, then Apply">Reconfigure access</button>
           <button data-command="restore">Restore last apply</button>
-          <button data-command="openAgents">Open AGENTS.md</button>
-          <button data-command="openAccess">Open access policy</button>
+          <button data-command="openConfiguration">Open AgentScope configuration</button>
           <button data-command="openCodex">Open Codex config</button>
         </div>
       </details>
@@ -152,7 +154,7 @@ export class ScopeView implements vscode.WebviewViewProvider, vscode.Disposable 
   <p id="status" role="status" aria-live="polite">Loading workspace…</p>
   <p id="preset" class="preset-status" role="status" aria-live="polite" hidden></p>
   <p id="notice" class="notice" hidden></p>
-  <p id="configuration-actions" class="configuration-actions" hidden><button type="button" class="link-button" data-command="reconfigure" title="Start fresh Read and Write selections, then Apply">Reconfigure access</button><button id="recover-saved" type="button" class="link-button" data-command="recover" title="Restore the last valid AGENTS.md and access policy" hidden>Recover saved configuration</button></p>
+  <p id="configuration-actions" class="configuration-actions" hidden><button type="button" class="link-button" data-command="reconfigure" title="Start fresh Read and Write selections, then Apply">Reconfigure access</button><button id="recover-saved" type="button" class="link-button" data-command="recover" title="Restore the last saved AgentScope selections" hidden>Recover saved configuration</button></p>
   <div class="table-wrap">
     <table id="permissions" role="treegrid" aria-label="Project and workspace file permissions">
       <thead><tr><th scope="col">Folder / path</th><th scope="col" class="permission-heading">Read</th><th scope="col" class="permission-heading">Write</th><th scope="col"><span class="sr-only">Path actions</span></th></tr></thead>

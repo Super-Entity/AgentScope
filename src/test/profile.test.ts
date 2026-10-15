@@ -28,7 +28,8 @@ test('Generated permissions retain precise read/write paths and deny disabled pr
   assert.equal(parsed.filesystem[path.join(root, 'secret')], 'deny');
   assert.equal(parsed.filesystem[path.join(root, 'full')], 'write');
   assert.equal(parsed.filesystem[path.join(root, 'Instructions')], 'read');
-  assert.equal(parsed.filesystem[path.join(root, ACCESS_POLICY_FILE)], 'read');
+  assert.equal(parsed.filesystem[path.join(root, ACCESS_POLICY_FILE)], undefined);
+  assert.equal(parsed.filesystem[path.join(root, 'AGENTS.md')], undefined);
   assert.equal(parsed.filesystem[path.join(root, '.agentscope')], undefined, 'Policy reads must not grant the whole tool folder');
   assert.equal(parsed.filesystem[gitRead], 'read');
   assert.equal(parsed.filesystem[gitWrite], 'write');
@@ -56,7 +57,8 @@ test('Runtime path mapping translates every grant and deny while keeping the sel
     root, runtimeRoot, profileName: 'agentscope', allowNetwork: false,
     gitReadPaths: [gitRead], gitWritePaths: [gitWrite],
   }).text);
-  assert.equal(output.filesystem['/mnt/d/MyApps/.agentscope/access.md'], 'read');
+  assert.equal(output.filesystem['/mnt/d/MyApps/.agentscope/access.md'], undefined);
+  assert.equal(output.filesystem['/mnt/d/MyApps/.codex'], 'read');
   assert.equal(output.filesystem['/mnt/d/MyApps/Instructions'], 'read');
   assert.equal(output.filesystem['/mnt/d/MyApps/project/references'], 'read');
   assert.equal(output.filesystem['/mnt/d/MyApps/project/drafts'], 'write');
@@ -83,7 +85,7 @@ test('An actual selected filesystem root remains a valid resolved runtime anchor
   const output = parsedProfile(generateProfile(emptyRegistry(), {
     root, runtimeRoot: root, filesystemMode: 'strict', profileName: 'agentscope', allowNetwork: false,
   }).text);
-  assert.equal(output.filesystem[path.join(root, ACCESS_POLICY_FILE)], 'read');
+  assert.equal(output.filesystem[path.join(root, ACCESS_POLICY_FILE)], undefined);
   assert.equal(output.filesystem[root], undefined);
 });
 
@@ -117,7 +119,7 @@ test('Windows compatibility allows broad reads without adding writes or disabled
   assert.equal(permissions['D:\\MyApps\\empty'], undefined);
   assert.equal(parsedProfile(output.text).network.enabled, false);
   assert.match(output.text, /# WARNING: .*all files, including disabled projects and unselected paths/);
-  assert.ok(output.warnings.some(warning => /Read selections are behavioral instructions only/.test(warning)));
+  assert.ok(output.warnings.some(warning => /Read selections do not restrict OS-level reads/.test(warning)));
   assert.ok(output.warnings.some(warning => /unelevated sandbox/.test(warning)));
 });
 
@@ -138,8 +140,8 @@ test('Windows compatibility preserves read-only carveouts inside an explicitly w
   const output = generateProfile(value, { root, runtimeRoot: 'D:\\MyApps', profileName: 'agentscope', allowNetwork: false });
   const permissions = parsedProfile(output.text).filesystem;
   assert.equal(permissions['D:\\MyApps'], 'write');
-  assert.equal(permissions['D:\\MyApps\\AGENTS.md'], 'read');
-  assert.equal(permissions['D:\\MyApps\\.agentscope\\access.md'], 'read');
+  assert.equal(permissions['D:\\MyApps\\AGENTS.md'], undefined);
+  assert.equal(permissions['D:\\MyApps\\.agentscope\\access.md'], undefined);
   assert.equal(permissions['D:\\MyApps\\.codex'], 'read');
 });
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0
+
+- Store AgentScope editor state in `.vscode/agentscope.json` and stop generating `AGENTS.md`, `.agentscope/access.md` and project instruction references. Import recognized legacy settings once; remove only canonical generated AGENTS blocks on Apply, preserving user prose and the sidecar backup.
+- Export saved presets as separate, content-versioned Codex permission profiles for selection per chat. Retain earlier exported profiles when a preset changes or is deleted so existing chats keep their identifiers.
+- Add an AgentScope new-chat command and optional Ctrl+N preset prompt. Explain the required manual selection in Codex's native permissions menu; the public Codex command cannot bind a profile or intercept its internal new-chat button.
+- Probe native Windows MXC support in Auto mode. Use strict permissions and pin MXC after successful verification; otherwise disclose legacy Windows broad-read compatibility. Keep WSL, Linux and macOS profiles strict.
+- Clarify that Codex enforces the selected `config.toml` profile for local commands; editor state and optional agent instructions do not enforce sandbox access or restrict independent remote/MCP tools.
+
 ## 0.7.6
 
 - Generate Windows-compatible filesystem profiles for native Windows by default, avoiding the legacy sandbox startup error requiring effective `:root` read access. Keep selected writes precise and disclose broad reads in the panel, generated profile and Apply confirmation.

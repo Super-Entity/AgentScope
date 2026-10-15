@@ -2,107 +2,110 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { test } from 'node:test';
-import { ACCESS_POLICY_FILE, readAccessRegistry, writeAccessFiles } from '../core/registry';
-import {
-  buildPolicyRecoveryPlan, checkpointFromLastApply, checkpointKey, createCheckpoint, PolicyCheckpoint, validateCheckpoint,
-} from '../recovery';
+import { readScopeConfiguration, SCOPE_CONFIGURATION_FILE, writeScopeConfiguration } from '../configuration';
+import { ACCESS_POLICY_FILE, writeAccessFiles } from '../core/registry';
+import { buildPolicyRecoveryPlan, checkpointFromLastApply, checkpointKey, createCheckpoint, PolicyCheckpoint, validateCheckpoint } from '../recovery';
 import { applyPlan, restoreChanges } from '../transactions';
 import { FileChange, WorkspaceState } from '../types';
 import { directoryLink, fixture, registry } from './helpers';
 
-function saved(root: string, prose = '# My project rules\n\nKeep these instructions.\n'): PolicyCheckpoint {
-  const files = writeAccessFiles(prose, null, registry());
-  return { version: 1, root, agents: files.agents, access: files.access, savedAt: '2026-01-02T03:04:05.000Z' };
+const timestamp = '2026-01-02T03:04:05.000Z';
+const targetPath = (root: string): string => path.join(root, ...SCOPE_CONFIGURATION_FILE.split('/'));
+function saved(root: string): PolicyCheckpoint {
+  return { version: 2, root, configuration: writeScopeConfiguration(null, registry()), savedAt: timestamp };
 }
-
 function state(checkpoint: PolicyCheckpoint): WorkspaceState {
   return {
-    root: checkpoint.root, registry: readAccessRegistry(checkpoint.agents, checkpoint.access)!,
-    hidden: {}, dirty: false, warnings: [],
-    files: {
-      [path.join(checkpoint.root, 'AGENTS.md')]: checkpoint.agents,
-      [path.join(checkpoint.root, ...ACCESS_POLICY_FILE.split('/'))]: checkpoint.access,
-    },
+    root: checkpoint.root, registry: readScopeConfiguration(checkpoint.configuration, checkpoint.root),
+    hidden: {}, dirty: false, warnings: [], files: { [targetPath(checkpoint.root)]: checkpoint.configuration },
   };
 }
-
-async function writePair(checkpoint: PolicyCheckpoint): Promise<void> {
-  await fs.mkdir(path.join(checkpoint.root, '.agentscope'), { recursive: true });
-  await fs.writeFile(path.join(checkpoint.root, 'AGENTS.md'), checkpoint.agents);
-  await fs.writeFile(path.join(checkpoint.root, '.agentscope', 'access.md'), checkpoint.access);
+async function writeConfiguration(checkpoint: PolicyCheckpoint): Promise<void> {
+  await fs.mkdir(path.dirname(targetPath(checkpoint.root)), { recursive: true });
+  await fs.writeFile(targetPath(checkpoint.root), checkpoint.configuration);
 }
-
 function outputs(checkpoint: PolicyCheckpoint): FileChange[] {
   return [
-    { path: path.join(checkpoint.root, '.agentscope', 'access.md'), before: null, after: checkpoint.access },
-    { path: path.join(checkpoint.root, 'AGENTS.md'), before: '# Existing instructions\n', after: checkpoint.agents },
+    { path: targetPath(checkpoint.root), before: null, after: checkpoint.configuration },
     { path: path.join(checkpoint.root, '.vscode', 'settings.json'), before: null, after: '{}' },
     { path: path.join(checkpoint.root, '.codex', 'config.toml'), before: null, after: '# Generated profile\n' },
   ];
 }
 
-test('A checkpoint captures the complete linked policy and all user prose without mutating the workspace state', async t => {
+test('A checkpoint captures exact persisted editor configuration without mutating state or reading files', async t => {
   const { root } = await fixture(t);
-  const checkpoint = saved(root, '\uFEFF# My rules\r\n\r\nCustom instructions stay.\r\n');
+  const checkpoint = saved(root);
+  checkpoint.configuration = '// Keep comments and metadata\n' + checkpoint.configuration;
   const workspace = state(checkpoint);
+  workspace.registry.submodules.project.enabled = false;
   const original = JSON.stringify(workspace);
   const captured = createCheckpoint(workspace);
   assert.ok(captured);
+  assert.equal(captured.version, 2);
   assert.equal(captured.root, root);
-  assert.equal(captured.agents, checkpoint.agents);
-  assert.equal(captured.access, checkpoint.access);
+  assert.equal(captured.configuration, checkpoint.configuration);
+  assert.equal(readScopeConfiguration(captured.configuration).submodules.project.enabled, true);
   assert.equal(new Date(captured.savedAt).toISOString(), captured.savedAt);
   assert.equal(JSON.stringify(workspace), original);
   assert.deepEqual(await fs.readdir(root), []);
 });
 
-test('Partial, draft, malformed and conflicting policy pairs never produce a replacement checkpoint', async t => {
+test('Draft, missing and malformed configuration snapshots never replace a checkpoint', async t => {
   const { root } = await fixture(t);
   const checkpoint = saved(root);
-  const candidates: WorkspaceState[] = [
-    { ...state(checkpoint), dirty: true },
-    { ...state(checkpoint), files: undefined },
-    { ...state(checkpoint), files: {} },
-  ];
-  for (const target of ['AGENTS.md', '.agentscope/access.md']) {
-    const missing = state(checkpoint);
-    missing.files![path.join(root, ...target.split('/'))] = null;
-    candidates.push(missing);
-    const corrupted = state(checkpoint);
-    corrupted.files![path.join(root, ...target.split('/'))] = 'Invalid policy without managed instructions';
-    candidates.push(corrupted);
-  }
-  const conflict = state(checkpoint);
-  conflict.files![path.join(root, 'AGENTS.md')] = '# Old policy\n```json\n'
-    + JSON.stringify(registry()) + '\n```\n';
-  candidates.push(conflict);
-  for (const candidate of candidates) assert.equal(createCheckpoint(candidate), null);
+  for (const candidate of [
+    { ...state(checkpoint), dirty: true }, { ...state(checkpoint), files: undefined }, { ...state(checkpoint), files: {} },
+    { ...state(checkpoint), files: { [targetPath(root)]: null } },
+    { ...state(checkpoint), files: { [targetPath(root)]: '{broken' } },
+    { ...state(checkpoint), files: { [targetPath(root)]: '{"version":2,"registry":{}}' } },
+  ]) assert.equal(createCheckpoint(candidate), null);
 });
 
-test('Policy checkpoint validation rejects unknown formats, roots, timestamps and unsafe grants', async t => {
+test('Checkpoint validation rejects unknown formats, roots, timestamps and unsafe grants', async t => {
   const { root, outside } = await fixture(t);
   const checkpoint = saved(root);
-  const invalid: unknown[] = [
-    null, [], 'snapshot', {},
-    { ...checkpoint, version: 2 },
-    { ...checkpoint, extra: 'unrecognized' },
-    { ...checkpoint, root: outside },
-    { ...checkpoint, root: 'workspace' },
-    { ...checkpoint, root: path.join(root, '..', 'workspace') + path.sep },
-    { ...checkpoint, savedAt: 'invalid time' },
-    { ...checkpoint, savedAt: '2026-01-02T03:04:05Z' },
-    { ...checkpoint, agents: '' },
-    { ...checkpoint, access: '' },
-    { ...checkpoint, agents: checkpoint.agents.replace('Before reading', 'Custom extra policy. Before reading') },
-    { ...checkpoint, access: checkpoint.access.replace('"references"', '"../outside"') },
-    { ...checkpoint, access: checkpoint.access.replace('"enabled": true', '"enabled": true, "enabled": false') },
-  ];
-  for (const value of invalid) assert.throws(() => validateCheckpoint(value, root));
+  for (const value of [
+    null, [], 'snapshot', {}, { ...checkpoint, version: 3 }, { ...checkpoint, extra: true },
+    { ...checkpoint, root: outside }, { ...checkpoint, root: 'workspace' },
+    { ...checkpoint, root: root + path.sep + '..' + path.sep + 'workspace' },
+    { ...checkpoint, savedAt: 'invalid time' }, { ...checkpoint, savedAt: '2026-01-02T03:04:05Z' },
+    { ...checkpoint, configuration: '' }, { ...checkpoint, configuration: '{"version":1,"registry":{}}' },
+    { ...checkpoint, configuration: checkpoint.configuration.replace('"references"', '"../outside"') },
+    { ...checkpoint, configuration: checkpoint.configuration.replace('"enabled": true', '"enabled": true, "enabled": false') },
+  ]) assert.throws(() => validateCheckpoint(value, root));
   assert.throws(() => validateCheckpoint(checkpoint, 'relative workspace'), /absolute normalized/);
   assert.deepEqual(validateCheckpoint(checkpoint, root), checkpoint);
 });
 
-test('Workspace checkpoint keys are stable, isolated and do not expose the workspace path', async t => {
+test('Legacy checkpoints migrate selections while removing instruction-file bindings', async t => {
+  const { root } = await fixture(t);
+  const selections = registry();
+  selections.submodules.project.instruction_file = 'project/references/workflow.md';
+  const files = writeAccessFiles('# Custom instructions stay in the old file\n', null, selections);
+  const migrated = validateCheckpoint({ version: 1, root, agents: files.agents, access: files.access, savedAt: timestamp }, root);
+  assert.equal(migrated.version, 2);
+  const imported = readScopeConfiguration(migrated.configuration, root);
+  assert.equal(imported.submodules.project.instruction_file, null);
+  assert.deepEqual(imported.submodules.project.write_paths, selections.submodules.project.write_paths);
+  const plan = await buildPolicyRecoveryPlan(root, migrated);
+  assert.deepEqual(plan.changes.map(change => change.path), [targetPath(root)]);
+  await applyPlan(plan);
+  await assert.rejects(fs.stat(path.join(root, 'AGENTS.md')), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(root, '.agentscope')), { code: 'ENOENT' });
+});
+
+test('Legacy checkpoint migration rejects incomplete, corrupt and conflicting linked policies', async t => {
+  const { root } = await fixture(t);
+  const files = writeAccessFiles('', null, registry());
+  const legacy = { version: 1, root, agents: files.agents, access: files.access, savedAt: timestamp };
+  for (const invalid of [
+    { ...legacy, agents: undefined }, { ...legacy, access: '' }, { ...legacy, access: '{broken' },
+    { ...legacy, extra: true }, { ...legacy, agents: files.agents.replace('Before reading', 'Changed policy. Before reading') },
+  ]) assert.throws(() => validateCheckpoint(invalid, root));
+  assert.equal(validateCheckpoint({ ...legacy, agents: '' }, root).version, 2, 'A valid retained sidecar can supply selections when old instructions were deleted.');
+});
+
+test('Checkpoint keys remain stable for migration and isolate workspace paths', async t => {
   const { root, outside } = await fixture(t);
   const key = checkpointKey(root);
   assert.match(key, /^agentscope\.policyCheckpoint\.v1\.[a-f0-9]{64}$/);
@@ -113,247 +116,190 @@ test('Workspace checkpoint keys are stable, isolated and do not expose the works
   assert.throws(() => checkpointKey('relative workspace'), /absolute normalized/);
 });
 
-test('A complete successful Apply backup can bootstrap a checkpoint without reading current files', async t => {
+test('Apply backups bootstrap new configuration or migrate a complete legacy pair without reading files', async t => {
   const { root } = await fixture(t);
   const checkpoint = saved(root);
   const captured = checkpointFromLastApply(root, outputs(checkpoint));
   assert.ok(captured);
-  assert.equal(captured.agents, checkpoint.agents);
-  assert.equal(captured.access, checkpoint.access);
+  assert.equal(captured.configuration, checkpoint.configuration);
+  assert.ok(checkpointFromLastApply(root, [outputs(checkpoint)[0]]));
+  const files = writeAccessFiles('# Retained custom prose\n', null, registry());
+  const migrated = checkpointFromLastApply(root, [
+    { path: path.join(root, 'AGENTS.md'), before: null, after: files.agents },
+    { path: path.join(root, ...ACCESS_POLICY_FILE.split('/')), before: null, after: files.access },
+  ]);
+  assert.ok(migrated);
+  assert.equal(migrated.version, 2);
+  assert.deepEqual(readScopeConfiguration(migrated.configuration), registry());
   assert.deepEqual(await fs.readdir(root), []);
 });
 
-test('Partial or malformed Apply backups cannot infer or import a checkpoint', async t => {
+test('Malformed, duplicate, partial legacy and unrelated backup entries cannot infer a checkpoint', async t => {
   const { root, outside } = await fixture(t);
-  const checkpoint = saved(root);
-  const changes = outputs(checkpoint);
-  const invalid: unknown[] = [
-    null, {}, [], changes.slice(0, 1), changes.slice(1),
-    [...changes, changes[0]],
-    [...changes, { path: path.join(root, 'unrelated.txt'), before: null, after: 'secret' }],
-    [{ ...changes[0], path: path.join(outside, 'access.md') }, ...changes.slice(1)],
-    [{ ...changes[0], before: undefined }, ...changes.slice(1)],
-    [{ ...changes[0], after: null }, ...changes.slice(1)],
-    [{ ...changes[0], extra: true }, ...changes.slice(1)],
-    [{ ...changes[0], path: '.agentscope/access.md' }, ...changes.slice(1)],
-    [{ ...changes[0], after: 'Corrupt output' }, ...changes.slice(1)],
-    [{ ...changes[0] }, { ...changes[1], after: '# Main instructions with no reference' }],
-  ];
-  for (const value of invalid) assert.equal(checkpointFromLastApply(root, value), null);
+  const changes = outputs(saved(root));
+  for (const value of [
+    null, {}, [], changes.slice(1), [...changes, changes[0]],
+    [...changes, { path: path.join(root, 'unrelated.txt'), before: null, after: 'text' }],
+    [{ ...changes[0], path: path.join(outside, 'agentscope.json') }],
+    [{ ...changes[0], before: undefined }], [{ ...changes[0], after: null }],
+    [{ ...changes[0], extra: true }], [{ ...changes[0], path: SCOPE_CONFIGURATION_FILE }],
+    [{ ...changes[0], after: 'Corrupt output' }],
+    [{ path: path.join(root, 'AGENTS.md'), before: null, after: '# Main instructions only' }],
+  ]) assert.equal(checkpointFromLastApply(root, value), null);
 });
 
-test('Recovery recreates both deleted files from exact saved contents and can undo their creation', async t => {
+test('Recovery creates only missing editor configuration and creation can be undone', async t => {
   const { root } = await fixture(t);
-  const checkpoint = saved(root, '# Preserve my rules\n\nA custom instruction.\n');
+  const checkpoint = saved(root);
   const plan = await buildPolicyRecoveryPlan(root, checkpoint);
-  assert.deepEqual(plan.changes.map(change => path.relative(root, change.path).replace(/\\/g, '/')),
-    ['.agentscope/access.md', 'AGENTS.md']);
-  assert.ok(plan.changes.every(change => change.before === null));
+  assert.deepEqual(plan.changes, [{ path: targetPath(root), before: null, after: checkpoint.configuration }]);
   assert.deepEqual(await fs.readdir(root), []);
   const changes = await applyPlan(plan);
-  assert.equal(await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8'), checkpoint.agents);
-  assert.equal(await fs.readFile(path.join(root, '.agentscope', 'access.md'), 'utf8'), checkpoint.access);
+  assert.equal(await fs.readFile(targetPath(root), 'utf8'), checkpoint.configuration);
+  assert.deepEqual(await fs.readdir(root), ['.vscode']);
   await restoreChanges(changes);
-  await assert.rejects(fs.stat(path.join(root, 'AGENTS.md')), { code: 'ENOENT' });
-  await assert.rejects(fs.stat(path.join(root, '.agentscope', 'access.md')), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(targetPath(root)), { code: 'ENOENT' });
 });
 
-test('Recovery restores either deleted file while guarding the unchanged authoritative counterpart', async t => {
-  for (const relative of ['AGENTS.md', '.agentscope/access.md']) {
-    await t.test(relative, async child => {
-      const { root } = await fixture(child);
-      const checkpoint = saved(root);
-      await writePair(checkpoint);
-      const target = path.join(root, ...relative.split('/'));
-      await fs.unlink(target);
-      const plan = await buildPolicyRecoveryPlan(root, checkpoint);
-      assert.equal(plan.changes.length, 1);
-      assert.equal(plan.changes[0].path, target);
-      assert.equal(plan.checks?.length, 2);
-      await applyPlan(plan);
-      assert.equal(await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8'), checkpoint.agents);
-      assert.equal(await fs.readFile(path.join(root, '.agentscope', 'access.md'), 'utf8'), checkpoint.access);
-    });
-  }
-});
-
-test('Corrupted or conflicting contents are restored exactly and remain available in the undo transaction', async t => {
+test('Recovery restores corrupt configuration exactly and undo preserves its original bytes', async t => {
   const { root } = await fixture(t);
   const checkpoint = saved(root);
-  await fs.mkdir(path.join(root, '.agentscope'));
-  const agents = '# Current user text\n\n```json\n' + JSON.stringify(registry()) + '\n```\n';
-  const access = '<!-- BEGIN AgentScope access policy -->\nBroken JSON and lost end marker\n';
-  await fs.writeFile(path.join(root, 'AGENTS.md'), agents);
-  await fs.writeFile(path.join(root, '.agentscope', 'access.md'), access);
+  await fs.mkdir(path.join(root, '.vscode'));
+  const corrupted = '// Preserve current text for undo\n{ incomplete registry';
+  await fs.writeFile(targetPath(root), corrupted);
   const plan = await buildPolicyRecoveryPlan(root, checkpoint);
-  assert.equal(plan.changes.find(change => path.basename(change.path) === 'AGENTS.md')?.before, agents);
-  assert.equal(plan.changes.find(change => path.basename(change.path) === 'access.md')?.before, access);
+  assert.equal(plan.changes[0].before, corrupted);
   const changes = await applyPlan(plan);
-  assert.equal(await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8'), checkpoint.agents);
+  assert.equal(await fs.readFile(targetPath(root), 'utf8'), checkpoint.configuration);
   await restoreChanges(changes);
-  assert.equal(await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8'), agents);
-  assert.equal(await fs.readFile(path.join(root, '.agentscope', 'access.md'), 'utf8'), access);
+  assert.equal(await fs.readFile(targetPath(root), 'utf8'), corrupted);
 });
 
-test('A healthy pair needs no writes and still has input and containment guards', async t => {
+test('Healthy configuration needs no writes but retains input, directory and containment guards', async t => {
   const { root } = await fixture(t);
   const checkpoint = saved(root);
-  await writePair(checkpoint);
+  await writeConfiguration(checkpoint);
   const plan = await buildPolicyRecoveryPlan(root, checkpoint);
   assert.deepEqual(plan.changes, []);
-  assert.equal(plan.checks?.length, 2);
-  assert.equal(plan.pathChecks?.length, 4);
+  assert.deepEqual(plan.checks, [{ path: targetPath(root), expected: checkpoint.configuration }]);
+  assert.equal(plan.pathChecks?.length, 3);
+  assert.equal(plan.directoryChecks?.length, 1);
   await applyPlan(plan);
 });
 
-test('Recovery refuses a saved checkpoint from another workspace before reading configuration', async t => {
+test('Recovery rejects another workspace checkpoint before reading configuration', async t => {
   const { root, outside } = await fixture(t);
-  const checkpoint = saved(outside);
   let reads = 0;
   t.mock.method(fs, 'readFile', async () => { reads++; throw new Error('Unexpected read'); });
-  await assert.rejects(buildPolicyRecoveryPlan(root, checkpoint), /different workspace/);
+  await assert.rejects(buildPolicyRecoveryPlan(root, saved(outside)), /different workspace/);
   assert.equal(reads, 0);
 });
 
-test('Recovery reads only the two exact policy files and ignores unrelated corrupt configuration', async t => {
+test('Recovery reads only its exact store and ignores instructions and broken unrelated configuration', async t => {
   const { root } = await fixture(t);
   const checkpoint = saved(root);
-  await writePair(checkpoint);
-  await fs.mkdir(path.join(root, '.vscode'));
+  await writeConfiguration(checkpoint);
   await fs.mkdir(path.join(root, '.codex'));
-  await fs.writeFile(path.join(root, '.vscode', 'settings.json'), '{ broken settings');
-  await fs.writeFile(path.join(root, '.codex', 'config.toml'), '[broken profile');
-  await fs.writeFile(path.join(root, '.gitmodules'), '[broken manifest');
+  await fs.mkdir(path.join(root, '.agentscope'));
+  await fs.writeFile(path.join(root, '.vscode', 'settings.json'), '{broken settings');
+  await fs.writeFile(path.join(root, '.codex', 'config.toml'), '[broken config');
+  await fs.writeFile(path.join(root, 'AGENTS.md'), 'Custom instructions remain untouched');
+  await fs.writeFile(path.join(root, '.agentscope', 'access.md'), 'Obsolete corrupt policy');
   const realRead = fs.readFile.bind(fs);
   const reads: string[] = [];
   t.mock.method(fs, 'readFile', async (...args: Parameters<typeof fs.readFile>) => {
-    reads.push(String(args[0]));
-    return realRead(...args);
+    reads.push(String(args[0])); return realRead(...args);
   });
   const plan = await buildPolicyRecoveryPlan(root, checkpoint);
-  assert.deepEqual(reads.sort(), [path.join(root, 'AGENTS.md'), path.join(root, '.agentscope', 'access.md')].sort());
+  assert.deepEqual(reads, [targetPath(root)]);
   assert.deepEqual(plan.changes, []);
 });
 
-test('Recovery rejects linked policy directories even when their destination is inside the workspace', async t => {
+test('Recovery rejects linked store parents with internal or external destinations', async t => {
   const { root, outside } = await fixture(t);
   const checkpoint = saved(root);
-  await directoryLink(outside, path.join(root, '.agentscope'));
+  const parent = path.join(root, '.vscode');
+  await directoryLink(outside, parent);
   await assert.rejects(buildPolicyRecoveryPlan(root, checkpoint), /symbolic link|junction/);
   assert.deepEqual(await fs.readdir(outside), []);
-  await fs.unlink(path.join(root, '.agentscope'));
-  const internal = path.join(root, 'retained-policy');
+  await fs.unlink(parent);
+  const internal = path.join(root, 'retained-configuration');
   await fs.mkdir(internal);
-  await directoryLink(internal, path.join(root, '.agentscope'));
+  await directoryLink(internal, parent);
   await assert.rejects(buildPolicyRecoveryPlan(root, checkpoint), /symbolic link|junction/);
   assert.deepEqual(await fs.readdir(internal), []);
 });
 
-test('Policy directories and non-directory parents cannot become recovery targets', async t => {
+test('Directories and non-directory parents cannot become recovery targets', async t => {
   const { root } = await fixture(t);
   const checkpoint = saved(root);
-  await fs.mkdir(path.join(root, 'AGENTS.md'));
+  await fs.mkdir(targetPath(root), { recursive: true });
   await assert.rejects(buildPolicyRecoveryPlan(root, checkpoint), /regular file/);
-  await fs.rmdir(path.join(root, 'AGENTS.md'));
-  await fs.writeFile(path.join(root, '.agentscope'), 'Keep this unrelated file');
+  await fs.rmdir(targetPath(root));
+  await fs.rmdir(path.dirname(targetPath(root)));
+  await fs.writeFile(path.join(root, '.vscode'), 'Keep this unrelated file');
   await assert.rejects(buildPolicyRecoveryPlan(root, checkpoint), /directory|ENOTDIR/);
-  assert.equal(await fs.readFile(path.join(root, '.agentscope'), 'utf8'), 'Keep this unrelated file');
+  assert.equal(await fs.readFile(path.join(root, '.vscode'), 'utf8'), 'Keep this unrelated file');
 });
 
-test('A canonical workspace root cannot silently change into a junction', async t => {
+test('A canonical root cannot become a junction before recovery is planned', async t => {
   const { root, outside } = await fixture(t);
-  const checkpoint = saved(root);
   await fs.rmdir(root);
   await directoryLink(outside, root);
-  await assert.rejects(buildPolicyRecoveryPlan(root, checkpoint), /workspace root changed/);
+  await assert.rejects(buildPolicyRecoveryPlan(root, saved(root)), /workspace root changed/);
   assert.deepEqual(await fs.readdir(outside), []);
 });
 
-test('External creation of either missing policy file after planning aborts the complete recovery', async t => {
-  for (const relative of ['AGENTS.md', '.agentscope/access.md']) {
-    await t.test(relative, async child => {
-      const { root } = await fixture(child);
-      const checkpoint = saved(root);
-      const plan = await buildPolicyRecoveryPlan(root, checkpoint);
-      const target = path.join(root, ...relative.split('/'));
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.writeFile(target, 'An external edit after planning');
-      await assert.rejects(applyPlan(plan), /changed.*refresh/i);
-      assert.equal(await fs.readFile(target, 'utf8'), 'An external edit after planning');
-      const other = relative === 'AGENTS.md' ? path.join(root, '.agentscope', 'access.md') : path.join(root, 'AGENTS.md');
-      await assert.rejects(fs.stat(other), { code: 'ENOENT' });
-    });
-  }
-});
-
-test('A valid grant change in the unchanged counterpart invalidates the recovery plan', async t => {
-  const { root } = await fixture(t);
-  const checkpoint = saved(root);
-  await writePair(checkpoint);
-  await fs.unlink(path.join(root, 'AGENTS.md'));
-  const plan = await buildPolicyRecoveryPlan(root, checkpoint);
-  const changed = checkpoint.access.replace('"enabled": true', '"enabled": false');
-  await fs.writeFile(path.join(root, '.agentscope', 'access.md'), changed);
-  await assert.rejects(applyPlan(plan), /changed.*refresh/i);
-  assert.equal(await fs.readFile(path.join(root, '.agentscope', 'access.md'), 'utf8'), changed);
-  await assert.rejects(fs.stat(path.join(root, 'AGENTS.md')), { code: 'ENOENT' });
-});
-
-test('Swapping a policy parent to a junction after planning cannot redirect writes', async t => {
-  const { root } = await fixture(t);
-  const checkpoint = saved(root);
-  await writePair(checkpoint);
-  await fs.unlink(path.join(root, 'AGENTS.md'));
-  const plan = await buildPolicyRecoveryPlan(root, checkpoint);
-  const retained = path.join(root, 'retained-policy');
-  await fs.rename(path.join(root, '.agentscope'), retained);
-  await directoryLink(retained, path.join(root, '.agentscope'));
-  await assert.rejects(applyPlan(plan), /parent.*symbolic link|symbolic.*parent|scope changed/i);
-  assert.equal(await fs.readFile(path.join(retained, 'access.md'), 'utf8'), checkpoint.access);
-  await assert.rejects(fs.stat(path.join(root, 'AGENTS.md')), { code: 'ENOENT' });
-});
-
-test('Failure of the second policy write rolls back the first to its complete pre-recovery contents', async t => {
-  const { root } = await fixture(t);
-  const checkpoint = saved(root);
-  await fs.mkdir(path.join(root, '.agentscope'));
-  const agentsPath = path.join(root, 'AGENTS.md');
-  const accessPath = path.join(root, '.agentscope', 'access.md');
-  await fs.writeFile(agentsPath, 'Corrupted main with user prose');
-  await fs.writeFile(accessPath, 'Corrupted access with comments');
-  const plan = await buildPolicyRecoveryPlan(root, checkpoint);
-  const realRename = fs.rename.bind(fs);
-  let failed = false;
-  t.mock.method(fs, 'rename', async (source: Parameters<typeof fs.rename>[0], destination: Parameters<typeof fs.rename>[1]) => {
-    if (String(destination) === agentsPath && !failed) {
-      failed = true;
-      throw new Error('Injected main policy replacement failure');
-    }
-    await realRename(source, destination);
+test('Creating or editing store contents after planning preserves the external edit', async t => {
+  for (const existing of [false, true]) await t.test(existing ? 'existing store' : 'missing store', async child => {
+    const { root } = await fixture(child);
+    const checkpoint = saved(root);
+    if (existing) await writeConfiguration(checkpoint);
+    const plan = await buildPolicyRecoveryPlan(root, checkpoint);
+    await fs.mkdir(path.dirname(targetPath(root)), { recursive: true });
+    await fs.writeFile(targetPath(root), 'External edit after planning');
+    await assert.rejects(applyPlan(plan), /changed.*refresh/i);
+    assert.equal(await fs.readFile(targetPath(root), 'utf8'), 'External edit after planning');
   });
-  await assert.rejects(applyPlan(plan), /Injected main policy/);
-  assert.equal(await fs.readFile(agentsPath, 'utf8'), 'Corrupted main with user prose');
-  assert.equal(await fs.readFile(accessPath, 'utf8'), 'Corrupted access with comments');
-  assert.deepEqual((await fs.readdir(root)).sort(), ['.agentscope', 'AGENTS.md']);
-  assert.deepEqual(await fs.readdir(path.join(root, '.agentscope')), ['access.md']);
 });
 
-test('Recovery never follows a policy-file symlink, including a broken link', async t => {
+test('Swapping the store parent to a junction after planning cannot redirect writes', async t => {
+  const { root } = await fixture(t);
+  const checkpoint = saved(root);
+  await writeConfiguration(checkpoint);
+  await fs.writeFile(targetPath(root), 'Corrupted configuration');
+  const plan = await buildPolicyRecoveryPlan(root, checkpoint);
+  const retained = path.join(root, 'retained-configuration');
+  await fs.rename(path.join(root, '.vscode'), retained);
+  await directoryLink(retained, path.join(root, '.vscode'));
+  await assert.rejects(applyPlan(plan), /parent.*symbolic link|symbolic.*parent|scope changed/i);
+  assert.equal(await fs.readFile(path.join(retained, 'agentscope.json'), 'utf8'), 'Corrupted configuration');
+});
+
+test('Replacing the ordinary workspace directory fails its captured identity guard', async t => {
+  const { root, base } = await fixture(t);
+  const plan = await buildPolicyRecoveryPlan(root, saved(root));
+  await fs.rename(root, path.join(base, 'retained-workspace'));
+  await fs.mkdir(root);
+  await assert.rejects(applyPlan(plan), /directory.*changed|changed.*directory/i);
+  assert.deepEqual(await fs.readdir(root), []);
+});
+
+test('Recovery never follows a store-file symlink, including a broken link', async t => {
   const { root, outside } = await fixture(t);
   const checkpoint = saved(root);
-  const source = path.join(outside, 'policy.md');
-  await fs.writeFile(source, 'External policy must be preserved');
-  const target = path.join(root, 'AGENTS.md');
-  try { await fs.symlink(source, target, 'file'); }
+  const source = path.join(outside, 'agentscope.json');
+  await fs.mkdir(path.dirname(targetPath(root)));
+  await fs.writeFile(source, 'External configuration must be preserved');
+  try { await fs.symlink(source, targetPath(root), 'file'); }
   catch (error) {
     if (['EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '')) {
-      t.skip('The current OS account cannot create file symbolic links.');
-      return;
+      t.skip('The current OS account cannot create file symbolic links.'); return;
     }
     throw error;
   }
   await assert.rejects(buildPolicyRecoveryPlan(root, checkpoint), /symbolic link|junction|regular file/);
-  assert.equal(await fs.readFile(source, 'utf8'), 'External policy must be preserved');
+  assert.equal(await fs.readFile(source, 'utf8'), 'External configuration must be preserved');
   await fs.unlink(source);
   await assert.rejects(buildPolicyRecoveryPlan(root, checkpoint), /symbolic link|junction/);
 });

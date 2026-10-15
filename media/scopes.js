@@ -29,8 +29,8 @@
   const normalized = value => value.replace(/\\/g, '/').split('/').filter(part => part && part !== '.').join('/') || '.';
   const compare = value => model && !model.caseSensitive ? value.toLowerCase() : value;
   const contains = (ancestor, target) => ancestor === '.' || compare(ancestor) === compare(target) || compare(target).startsWith(`${compare(ancestor)}/`);
-  const readOnlyCommands = new Set(['refresh', 'selectWorkspace', 'preview', 'openAgents', 'openAccess', 'openCodex']);
-  const configurationErrorCommands = new Set(['refresh', 'selectWorkspace', 'openAgents', 'openAccess', 'openCodex', 'restore', 'recover', 'reconfigure']);
+  const readOnlyCommands = new Set(['refresh', 'selectWorkspace', 'preview', 'openConfiguration', 'openCodex']);
+  const configurationErrorCommands = new Set(['refresh', 'selectWorkspace', 'openConfiguration', 'openCodex', 'restore', 'recover', 'reconfigure']);
 
   function element(tag, className, text) {
     const result = document.createElement(tag);
@@ -227,7 +227,7 @@
       const actions = element('td', 'actions-cell');
       if (row.project) {
         actions.append(actionButton(row.enabled ? 'Disable' : 'Enable', 'toggleAccess', row.name, row.enabled ? 'Disable project without clearing saved path selections' : 'Enable saved project path selections'));
-        actions.append(actionButton('⋯', 'configure', row.name, 'Configure paths and instruction file'));
+        actions.append(actionButton('⋯', 'configure', row.name, 'Configure paths'));
         if (!row.scope || row.scope.path !== '.') actions.append(actionButton(row.hidden ? 'Show' : 'Hide', 'toggleVisibility', row.name, row.hidden ? 'Show folder in Explorer' : 'Hide folder in Explorer'));
       } else if (resourceRow(row) && row.selectable !== false && !resourceRoot(row)) {
         actions.append(actionButton(hidden ? 'Show' : 'Hide', 'toggleResourceVisibility', row.name, hidden ? 'Show path in Explorer' : 'Hide path in Explorer', { target: 'resource', relative: row.relative }));
@@ -332,6 +332,11 @@
     preset.textContent = preset.hidden ? '' : `Preset: ${model.preset}${model.dirty ? ' (draft)' : ''}`;
     preset.classList.toggle('is-active', !preset.hidden && !model.dirty);
     preset.classList.toggle('is-draft', !preset.hidden && model.dirty);
+    const presetPrompt = document.getElementById('new-chat-preset-prompt');
+    if (presetPrompt) {
+      presetPrompt.setAttribute('aria-checked', String(model.promptPresetForNewChat === true));
+      presetPrompt.textContent = `${model.promptPresetForNewChat ? '✓ ' : ''}Prompt for preset before new chat`;
+    }
     const warnings = [];
     if (model.scopeNotice) warnings.push(model.scopeNotice);
     if (!model.trusted) warnings.push('Restricted Mode: trust this workspace to change permissions.');

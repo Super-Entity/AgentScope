@@ -5,7 +5,8 @@ import { test } from 'node:test';
 import * as TOML from '@iarna/toml';
 import { parse } from 'jsonc-parser';
 import { buildApplyPlan, loadWorkspace, ApplyOptions } from '../workspace';
-import { ACCESS_POLICY_FILE, emptyRegistry, readAccessRegistry, writeAccessFiles } from '../core/registry';
+import { ACCESS_POLICY_FILE, emptyRegistry, writeAccessFiles } from '../core/registry';
+import { readScopeConfiguration, SCOPE_CONFIGURATION_FILE } from '../configuration';
 import { applyPlan, restoreChanges } from '../transactions';
 import { directoryLink, fixture, policy, project, registry } from './helpers';
 import { toggleResourceSelection } from '../resources';
@@ -16,7 +17,7 @@ function filesystem(text: string): Record<string, string> {
   return (TOML.parse(text) as unknown as { permissions: { agentscope: { filesystem: Record<string, string> } } }).permissions.agentscope.filesystem;
 }
 
-test('Switching Windows and WSL profiles replaces stale grants and preserves the policy and user configuration', async (t) => {
+test('Switching Windows and WSL profiles replaces stale grants and preserves editor state and user configuration', async (t) => {
   const { root } = await fixture(t);
   await fs.mkdir(path.join(root, 'Instructions'));
   await fs.mkdir(path.join(root, 'project', 'references'), { recursive: true });
@@ -36,7 +37,8 @@ test('Switching Windows and WSL profiles replaces stale grants and preserves the
   assert.ok(!Object.values(native).includes('deny'));
   assert.equal(native['E:\\Apps'], undefined);
   await applyPlan(windows);
-  const policyBefore = await fs.readFile(path.join(root, ACCESS_POLICY_FILE), 'utf8');
+  const configurationBefore = await fs.readFile(path.join(root, SCOPE_CONFIGURATION_FILE), 'utf8');
+  await assert.rejects(fs.stat(path.join(root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
 
   const wsl = await buildApplyPlan(await loadWorkspace(root), { ...auto, codexRuntime: 'wsl', codexWorkspaceRoot: '/mnt/e/Apps' });
   assert.equal(wsl.broadReadAccess, false);
@@ -51,7 +53,7 @@ test('Switching Windows and WSL profiles replaces stale grants and preserves the
   assert.ok(!Object.keys(linux).some(key => /^[A-Za-z]:/.test(key)));
   assert.equal((TOML.parse(wslText) as any).features.custom, true);
   assert.match(wslText, /# Keep user configuration/);
-  assert.equal(await fs.readFile(path.join(root, ACCESS_POLICY_FILE), 'utf8'), policyBefore);
+  assert.equal(await fs.readFile(path.join(root, SCOPE_CONFIGURATION_FILE), 'utf8'), configurationBefore);
 
   const again = await buildApplyPlan(await loadWorkspace(root), auto);
   assert.equal(again.broadReadAccess, true);
@@ -149,7 +151,7 @@ test('Ordinary workspaces start with a disabled root project but explicit empty 
   assert.deepEqual((await loadWorkspace(root)).registry.submodules, {});
 });
 
-test('A deleted AGENTS.md keeps saved access choices and only Apply recreates its reference', async (t) => {
+test('A missing AGENTS.md imports saved choices into editor state without recreating instructions', async (t) => {
   const { root } = await fixture(t);
   const saved = registry({
     project: project({ instruction_file: 'Instructions/Writer.md' }),
@@ -168,21 +170,24 @@ test('A deleted AGENTS.md keeps saved access choices and only Apply recreates it
   await fs.writeFile(settings, configuredSettings);
 
   const state = await loadWorkspace(root);
-  assert.deepEqual(state.registry, saved, 'Missing main instructions must not disable or broaden saved selections');
+  const imported = structuredClone(saved);
+  imported.submodules.project.instruction_file = null;
+  assert.deepEqual(state.registry, imported, 'Missing main instructions must not disable or broaden saved selections');
   assert.equal(state.files?.[main], null);
   assert.equal(state.files?.[access], generated.access);
-  assert.deepEqual(state.warnings, ['AGENTS.md is missing. Apply will recreate its access reference; saved access settings are preserved.']);
+  assert.ok(state.warnings.some(warning => /Legacy AgentScope selections were imported/.test(warning)));
   await assert.rejects(fs.stat(main), { code: 'ENOENT' }, 'Loading must not recreate the deleted file');
 
   const plan = await buildApplyPlan(state, { ...options, generateCodexProfile: false });
-  assert.deepEqual(plan.changes, [{ path: main, before: null, after: generated.agents }]);
+  assert.deepEqual(plan.changes.map(change => change.path), [path.join(root, SCOPE_CONFIGURATION_FILE)]);
+  assert.deepEqual(readScopeConfiguration(plan.changes[0].after), imported);
   assert.ok(plan.checks?.some(check => check.path === access && check.expected === generated.access));
   await assert.rejects(fs.stat(main), { code: 'ENOENT' }, 'Preview must not recreate the deleted file');
   await applyPlan(plan);
-  assert.equal(await fs.readFile(main, 'utf8'), generated.agents);
+  await assert.rejects(fs.stat(main), { code: 'ENOENT' });
   assert.equal(await fs.readFile(access, 'utf8'), generated.access);
   assert.equal(await fs.readFile(settings, 'utf8'), configuredSettings);
-  assert.deepEqual((await loadWorkspace(root)).registry, saved);
+  assert.deepEqual((await loadWorkspace(root)).registry, imported);
   assert.deepEqual((await loadWorkspace(root)).warnings, []);
   await assert.rejects(fs.stat(path.join(root, '.codex')), { code: 'ENOENT' });
 
@@ -190,7 +195,7 @@ test('A deleted AGENTS.md keeps saved access choices and only Apply recreates it
   await assert.rejects(fs.stat(main), { code: 'ENOENT' });
   assert.equal(await fs.readFile(access, 'utf8'), generated.access, 'Restore must preserve the pre-existing policy');
   assert.equal(await fs.readFile(settings, 'utf8'), configuredSettings);
-  assert.deepEqual((await loadWorkspace(root)).registry, saved);
+  assert.deepEqual((await loadWorkspace(root)).registry, imported);
 });
 
 test('A deleted AGENTS.md cannot hide an invalid or user-owned access policy behind default discovery', async (t) => {
@@ -314,12 +319,13 @@ test('Project scopes and project-root aliases resolving into Git metadata are re
   await assert.rejects(buildApplyPlan(await loadWorkspace(root), options), /Git metadata/i);
 });
 
-test('Selected instructions must exist and stay inside the verified readable scope', async (t) => {
+test('Legacy workflow selections are cleared without reading workflow files; shared path links remain restricted', async (t) => {
   const { root, outside } = await fixture(t);
   const value = registry({ project: project({ instruction_file: 'Instructions/Writer.md' }) });
   await fs.writeFile(path.join(root, 'AGENTS.md'), policy(value));
   const state = await loadWorkspace(root);
-  await assert.rejects(buildApplyPlan(state, options), /instruction_file does not exist/);
+  assert.equal(state.registry.submodules.project.instruction_file, null);
+  await buildApplyPlan(state, options);
   await directoryLink(outside, path.join(root, 'Instructions'));
   await assert.rejects(buildApplyPlan(state, options), /symbolic link|junction/);
 });
@@ -443,7 +449,9 @@ test('Adding ordinary children after loading keeps the draft valid', async (t) =
   await fs.mkdir(path.join(root, 'notes'));
   await applyPlan(await buildApplyPlan(state, { ...options, generateCodexProfile: false }));
   assert.equal(await fs.readFile(path.join(root, 'notes.md'), 'utf8'), 'Ordinary child edits do not replace the workspace.');
-  assert.ok((await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8')).includes('AgentScope access reference'));
+  assert.ok(await fs.stat(path.join(root, SCOPE_CONFIGURATION_FILE)));
+  await assert.rejects(fs.stat(path.join(root, 'AGENTS.md')), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
 });
 
 test('A root replacement during configuration loading cannot produce a healthy stale state', async (t) => {
@@ -515,60 +523,97 @@ test('A changed Git pointer after planning cannot grant stale metadata permissio
   await assert.rejects(fs.stat(path.join(root, '.codex')), { code: 'ENOENT' });
 });
 
-test('Split policy preserves existing user instructions and restores the original files', async (t) => {
+test('Editor configuration leaves user instructions byte-identical and Restore removes only the new store', async (t) => {
   const { root } = await fixture(t);
   const main = '\uFEFF# Workspace rules\r\n\r\nKeep these instructions exactly.\r\n```json\r\n{"editor": "local"}\r\n```';
   await fs.writeFile(path.join(root, 'AGENTS.md'), main);
   const state = await loadWorkspace(root);
   state.registry = emptyRegistry();
   const plan = await buildApplyPlan(state, { ...options, generateCodexProfile: false });
-  assert.deepEqual(plan.changes.map(change => path.relative(root, change.path).replace(/\\/g, '/')), [ACCESS_POLICY_FILE, 'AGENTS.md']);
+  assert.deepEqual(plan.changes.map(change => path.relative(root, change.path).replace(/\\/g, '/')), [SCOPE_CONFIGURATION_FILE]);
   await assert.rejects(fs.stat(path.join(root, '.agentscope')), { code: 'ENOENT' }, 'Preview must not create files');
   await applyPlan(plan);
   const mainAfter = await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8');
-  const accessAfter = await fs.readFile(path.join(root, ACCESS_POLICY_FILE), 'utf8');
-  assert.ok(mainAfter.startsWith('\uFEFF<!-- BEGIN AgentScope access reference -->'));
-  assert.ok(mainAfter.endsWith(main.slice(1)), 'Original prose, fence and final newline must be preserved');
-  assert.equal((mainAfter.match(/BEGIN AgentScope access reference/g) ?? []).length, 1);
-  assert.deepEqual(readAccessRegistry(mainAfter, accessAfter), emptyRegistry());
+  assert.equal(mainAfter, main, 'Original prose, fence, BOM and final newline must be preserved');
+  assert.deepEqual(readScopeConfiguration(await fs.readFile(path.join(root, SCOPE_CONFIGURATION_FILE), 'utf8')), emptyRegistry());
+  await assert.rejects(fs.stat(path.join(root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
   assert.deepEqual((await buildApplyPlan(await loadWorkspace(root), { ...options, generateCodexProfile: false })).changes, []);
   await restoreChanges(plan.changes);
   assert.equal(await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8'), main);
+  await assert.rejects(fs.stat(path.join(root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
   await assert.rejects(fs.stat(path.join(root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
 });
 
-test('Legacy migration retains JSONC annotations and subsequent access edits change only the sidecar', async (t) => {
+test('Legacy migration retains metadata and user prose; subsequent access edits change only editor state', async (t) => {
   const { root } = await fixture(t);
   const value = registry();
   value.metadata = { owner: 'local' };
   const legacy = policy(value).replace('```json\n{', '```jsonc\n{\n  // Keep my access annotation');
   await fs.writeFile(path.join(root, 'AGENTS.md'), legacy);
   const first = await buildApplyPlan(await loadWorkspace(root), options);
-  assert.equal(first.changes[0].path, path.join(root, ACCESS_POLICY_FILE));
+  assert.equal(first.changes[0].path, path.join(root, SCOPE_CONFIGURATION_FILE));
   await applyPlan(first);
   const main = await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8');
-  const access = await fs.readFile(path.join(root, ACCESS_POLICY_FILE), 'utf8');
+  const configuration = await fs.readFile(path.join(root, SCOPE_CONFIGURATION_FILE), 'utf8');
   assert.match(main, /Keep my editorial rules/);
   assert.match(main, /Tail policy remains/);
-  assert.ok(main.endsWith(legacy), 'First Apply must retain the complete original AGENTS.md, including its inline registry');
-  assert.match(access, /\/\/ Keep my access annotation/);
-  assert.deepEqual(readAccessRegistry(main, access)?.metadata, { owner: 'local' });
+  assert.ok(!main.includes('BEGIN AgentScope'), 'Canonical generated instructions must be detached during migration');
+  assert.ok(!main.includes('"submodules"'), 'Canonical generated registry must move out of agent instructions');
+  assert.match(configuration, /\/\/ Keep my access annotation/);
+  assert.deepEqual(readScopeConfiguration(configuration).metadata, { owner: 'local' });
+  await assert.rejects(fs.stat(path.join(root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
   const reloaded = await loadWorkspace(root);
   reloaded.registry.submodules.project.enabled = false;
   const update = await buildApplyPlan(reloaded, { ...options, generateCodexProfile: false });
-  assert.deepEqual(update.changes.map(change => change.path), [path.join(root, ACCESS_POLICY_FILE)]);
-  assert.ok(update.checks?.some(check => check.path === path.join(root, 'AGENTS.md')), 'Unchanged reference remains a conflict-checked input');
+  assert.deepEqual(update.changes.map(change => change.path), [path.join(root, SCOPE_CONFIGURATION_FILE)]);
+  assert.ok(!update.checks?.some(check => check.path === path.join(root, 'AGENTS.md')), 'After migration instructions are independent of editor state');
   await applyPlan(update);
   assert.equal(await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8'), main);
   const updated = await loadWorkspace(root);
   assert.equal(updated.registry.submodules.project.enabled, false);
-  assert.match(main, /"enabled": true/, 'The preserved historical registry must not reactivate a disabled sidecar project');
+  assert.ok(!main.includes('"enabled"'), 'Generated historical choices must not remain in agent instructions');
   await restoreChanges(first.changes).then(() => assert.fail('A changed policy must prevent restoring an older application'), error => {
     assert.match(String(error), /changed|match/i);
   });
 });
 
-test('Both changed and unchanged sidecars are protected against external edits', async (t) => {
+test('Migrated editor state ignores damaged legacy instructions and sidecars during later loading and Apply', async (t) => {
+  const { root } = await fixture(t);
+  const saved = registry();
+  const legacy = writeAccessFiles('# User rules\n', null, saved);
+  const agents = path.join(root, 'AGENTS.md');
+  const access = path.join(root, ACCESS_POLICY_FILE);
+  await fs.mkdir(path.dirname(access));
+  await fs.writeFile(agents, legacy.agents);
+  await fs.writeFile(access, legacy.access);
+  await applyPlan(await buildApplyPlan(await loadWorkspace(root), { ...options, generateCodexProfile: false }));
+  assert.equal(await fs.readFile(access, 'utf8'), legacy.access, 'Migration retains the original backup');
+
+  const userAgents = '<!-- BEGIN AgentScope access reference -->\nCustomized and intentionally incomplete.\n';
+  const userAccess = 'The old sidecar is now independent user data.\n';
+  await fs.writeFile(agents, userAgents);
+  await fs.writeFile(access, userAccess);
+  const readFile = fs.readFile.bind(fs);
+  const reads = t.mock.method(fs, 'readFile', async (...args: Parameters<typeof fs.readFile>) => {
+    assert.ok(![agents, access].includes(String(args[0])), 'Existing editor state must not read legacy policy files');
+    return readFile(...args);
+  });
+  const state = await loadWorkspace(root);
+  assert.deepEqual(state.registry, saved);
+  assert.equal(Object.hasOwn(state.files ?? {}, agents), false);
+  assert.equal(Object.hasOwn(state.files ?? {}, access), false);
+  state.registry.submodules.project.enabled = false;
+  await applyPlan(await buildApplyPlan(state, { ...options, generateCodexProfile: false }));
+  reads.mock.restore();
+  assert.equal(await fs.readFile(agents, 'utf8'), userAgents);
+  assert.equal(await fs.readFile(access, 'utf8'), userAccess);
+  assert.equal((await loadWorkspace(root)).registry.submodules.project.enabled, false);
+  await fs.unlink(agents);
+  await fs.unlink(access);
+  assert.equal((await loadWorkspace(root)).registry.submodules.project.enabled, false);
+});
+
+test('Both changed and unchanged editor stores are protected against external edits', async (t) => {
   for (const changePolicy of [false, true]) {
     const { root } = await fixture(t);
     await fs.writeFile(path.join(root, 'AGENTS.md'), policy(registry()));
@@ -579,8 +624,8 @@ test('Both changed and unchanged sidecars are protected against external edits',
     state.hidden.project = true;
     if (changePolicy) state.registry.submodules.project.enabled = false;
     const plan = await buildApplyPlan(state, options);
-    const target = path.join(root, ACCESS_POLICY_FILE);
-    const userEdit = (await fs.readFile(target, 'utf8')) + '\nUser policy annotation.\n';
+    const target = path.join(root, SCOPE_CONFIGURATION_FILE);
+    const userEdit = (await fs.readFile(target, 'utf8')) + '\n// User editor-state annotation.\n';
     await fs.writeFile(target, userEdit);
     await assert.rejects(applyPlan(plan), /changed.*refresh/i);
     assert.equal(await fs.readFile(target, 'utf8'), userEdit);
@@ -588,11 +633,11 @@ test('Both changed and unchanged sidecars are protected against external edits',
   }
 });
 
-test('A sidecar created externally after loading cannot be overwritten by first Apply', async (t) => {
+test('Editor state created externally after loading cannot be overwritten by first Apply', async (t) => {
   const { root } = await fixture(t);
   const state = await loadWorkspace(root);
-  await fs.mkdir(path.join(root, '.agentscope'));
-  const target = path.join(root, ACCESS_POLICY_FILE);
+  await fs.mkdir(path.join(root, '.vscode'));
+  const target = path.join(root, SCOPE_CONFIGURATION_FILE);
   await fs.writeFile(target, 'User-owned notes.\n');
   const plan = await buildApplyPlan(state, options);
   await assert.rejects(applyPlan(plan), /changed.*refresh/i);
@@ -600,18 +645,18 @@ test('A sidecar created externally after loading cannot be overwritten by first 
   await assert.rejects(fs.stat(path.join(root, 'AGENTS.md')), { code: 'ENOENT' });
 });
 
-test('Sidecar directory links and directory collisions are refused before writes', async (t) => {
+test('Editor-store directory links and directory collisions are refused before writes', async (t) => {
   const { root, outside } = await fixture(t);
   const state = await loadWorkspace(root);
   const plan = await buildApplyPlan(state, options);
-  await directoryLink(outside, path.join(root, '.agentscope'));
+  await directoryLink(outside, path.join(root, '.vscode'));
   await assert.rejects(applyPlan(plan), /symbolic link|junction|parent changed/i);
   await assert.rejects(loadWorkspace(root), /symbolic link|junction/i);
   await assert.rejects(buildApplyPlan(state, options), /symbolic link|junction/i);
   assert.deepEqual(await fs.readdir(outside), []);
   await assert.rejects(fs.stat(path.join(root, 'AGENTS.md')), { code: 'ENOENT' });
-  await fs.unlink(path.join(root, '.agentscope'));
-  await fs.mkdir(path.join(root, ACCESS_POLICY_FILE), { recursive: true });
+  await fs.unlink(path.join(root, '.vscode'));
+  await fs.mkdir(path.join(root, SCOPE_CONFIGURATION_FILE), { recursive: true });
   await assert.rejects(loadWorkspace(root), /regular file/i);
 });
 
@@ -625,20 +670,21 @@ test('A managed reference cannot fall back to a legacy registry when its sidecar
   await assert.rejects(loadWorkspace(root), /managed|registry|policy/i);
 });
 
-test('A failed reference write rolls back the new sidecar and preserves original instructions', async (t) => {
+test('A failed migration write rolls back the new editor store and preserves original instructions', async (t) => {
   const { root } = await fixture(t);
   const main = path.join(root, 'AGENTS.md');
-  const original = 'My existing workspace instructions.\n';
+  const original = policy(emptyRegistry(), 'My existing workspace instructions.\n');
   await fs.writeFile(main, original);
   const plan = await buildApplyPlan(await loadWorkspace(root), { ...options, generateCodexProfile: false });
   const rename = fs.rename.bind(fs);
   t.mock.method(fs, 'rename', async (source: Parameters<typeof fs.rename>[0], target: Parameters<typeof fs.rename>[1]) => {
-    if (String(target) === main) throw new Error('Injected reference write failure');
+    if (String(target) === main) throw new Error('Injected migration write failure');
     await rename(source, target);
   });
-  await assert.rejects(applyPlan(plan), /Injected reference write failure/);
+  await assert.rejects(applyPlan(plan), /Injected migration write failure/);
   assert.equal(await fs.readFile(main, 'utf8'), original);
   await assert.rejects(fs.stat(path.join(root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
   assert.deepEqual(await fs.readdir(root), ['AGENTS.md']);
 });
 

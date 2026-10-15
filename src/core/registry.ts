@@ -380,6 +380,25 @@ export function readAccessRegistry(agentsText: string, accessText: string | null
   return fence ? coerceRegistry(fence.value) : null;
 }
 
+/** Preserve JSONC annotations when importing a legacy registry into editor storage. */
+export function legacyRegistryJsonc(agentsText: string, accessText: string | null): string | null {
+  const source = inspectAccessSource(agentsText, accessText);
+  return (source.accessFence || source.mainFence)?.content ?? null;
+}
+
+/** One-time migration removes only canonical generated instructions, preserving user prose. */
+export function detachLegacyInstructions(agentsText: string, accessText: string | null): string {
+  const source = inspectAccessSource(agentsText, accessText);
+  const spans: Array<{ start: number; end: number }> = [];
+  if (source.reference) spans.push(source.reference);
+  if (source.legacy) {
+    requireOwnedRules(agentsText, source.legacy, managedRules, 'AGENTS.md');
+    const fence = requireAssociatedFence(agentsText, source.legacy, findRegistry(agentsText), 'AGENTS.md');
+    spans.push(source.legacy, fence);
+  }
+  return spans.sort((a, b) => b.start - a.start).reduce((text, span) => text.slice(0, span.start) + text.slice(span.end), agentsText);
+}
+
 function prependAccessReference(text: string, reference: ManagedBlock | null): string {
   const eol = text.includes('\r\n') ? '\r\n' : '\n';
   const rendered = accessReference.replace(/\n/g, eol);

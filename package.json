@@ -1,8 +1,8 @@
 {
   "name": "agentscope",
   "displayName": "AgentScope",
-  "description": "Manage project visibility, agent instructions and Codex filesystem scopes from one workspace panel.",
-  "version": "0.7.6",
+  "description": "Manage workspace visibility and independent Codex permission profiles for saved project scopes.",
+  "version": "0.8.0",
   "icon": "media/icon.png",
   "publisher": "SuperEntity",
   "license": "MIT",
@@ -31,7 +31,8 @@
     "virtualWorkspaces": false
   },
   "activationEvents": [
-    "onView:agentscope.projects"
+    "onView:agentscope.projects",
+    "onStartupFinished"
   ],
   "scripts": {
     "compile": "tsc -p .",
@@ -148,19 +149,26 @@
         "icon": "$(settings-gear)"
       },
       {
-        "command": "agentscope.openAgents",
-        "title": "Open AGENTS.md",
-        "category": "AgentScope"
-      },
-      {
-        "command": "agentscope.openAccess",
-        "title": "Open access policy",
+        "command": "agentscope.openConfiguration",
+        "title": "Open AgentScope configuration",
         "category": "AgentScope"
       },
       {
         "command": "agentscope.openCodex",
         "title": "Open Codex workspace configuration",
         "category": "AgentScope"
+      },
+      {
+        "command": "agentscope.newChat",
+        "title": "New Codex chat",
+        "category": "AgentScope",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "agentscope.toggleNewChatPresetPrompt",
+        "title": "Prompt for a preset before new AgentScope chats",
+        "category": "AgentScope",
+        "toggled": "config.agentscope.promptPresetForNewChat"
       },
       {
         "command": "agentscope.savePreset",
@@ -209,12 +217,12 @@
           "group": "configuration@5"
         },
         {
-          "command": "agentscope.openAgents",
+          "command": "agentscope.openConfiguration",
           "when": "view == agentscope.projects",
           "group": "configuration@6"
         },
         {
-          "command": "agentscope.openAccess",
+          "command": "agentscope.toggleNewChatPresetPrompt",
           "when": "view == agentscope.projects",
           "group": "configuration@7"
         },
@@ -225,9 +233,30 @@
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "agentscope.newChat",
+        "key": "ctrl+n",
+        "mac": "cmd+n",
+        "when": "chatgpt.supportsNewChatKeyShortcut && config.agentscope.promptPresetForNewChat"
+      }
+    ],
     "configuration": {
       "title": "AgentScope",
       "properties": {
+        "agentscope.promptPresetForNewChat": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Show saved presets before AgentScope: New Codex chat and Codex's Ctrl+N shortcut. Select the matching permission profile in Codex before sending. Codex's internal + button cannot be intercepted by external extensions."
+        },
+        "agentscope.codexWindowsSandbox": {
+          "type": "string",
+          "enum": ["auto", "mxc", "legacy"],
+          "default": "auto",
+          "scope": "resource",
+          "description": "Native Windows backend. Auto verifies MXC with Codex on eligible Windows 11 systems, pins it when supported, and otherwise uses the legacy elevated backend. MXC fails if verification fails. WSL uses its Linux sandbox."
+        },
         "agentscope.generateCodexProfile": {
           "type": "boolean",
           "default": true,
@@ -256,13 +285,13 @@
           "type": "string",
           "enum": ["auto", "strict", "windows-compatible"],
           "enumDescriptions": [
-            "Use Windows compatibility for Windows runtime paths and strict read isolation for Linux, macOS and WSL paths.",
+            "Use strict isolation with verified MXC on native Windows, otherwise Windows compatibility. Linux, macOS and WSL use strict isolation.",
             "Restrict reads and writes to selected paths. Native Windows requires a compatible sandbox such as MXC; legacy Windows sandboxes may refuse to start.",
-            "Allow broad reads on native Windows while restricting writes to selected paths. Read choices remain agent instructions. Linux, macOS and WSL keep strict read isolation."
+            "Allow broad reads on native Windows while restricting writes to selected paths. Linux, macOS and WSL keep strict read isolation."
           ],
           "default": "auto",
           "scope": "resource",
-          "description": "Filesystem compatibility for the selected Codex runtime. Auto permits reading files outside selected paths on native Windows. Preview and Apply to regenerate the profile; start a new Codex session."
+          "description": "Filesystem compatibility for the selected Codex runtime. Auto uses verified MXC when available; legacy native Windows permits reading outside selected paths. Preview and Apply to regenerate profiles."
         },
         "agentscope.excludeFromSearch": {
           "type": "boolean",

@@ -4,7 +4,8 @@ import Module = require('node:module');
 import * as path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import * as TOML from '@iarna/toml';
-import { ACCESS_POLICY_FILE, parseJsoncStrict, readAccessRegistry, readAgentsRegistry, writeAccessFiles } from '../core/registry';
+import { parseJsoncStrict, writeAccessFiles } from '../core/registry';
+import { readScopeConfiguration, SCOPE_CONFIGURATION_FILE, writeScopeConfiguration } from '../configuration';
 import { checkpointKey, validateCheckpoint } from '../recovery';
 import type { ModuleConfig } from '../types';
 import type { PermissionRow, ScopeViewModel } from '../scopeView';
@@ -121,6 +122,7 @@ async function activateInFixture(t: TestContext, isTrusted = true, failBackupSav
   const host: any = {
     Uri: MockUri,
     StatusBarAlignment: { Left: 1, Right: 2 },
+    ConfigurationTarget: { WorkspaceFolder: 3 },
     RelativePattern: class { constructor(readonly base: string, readonly pattern: string) {} },
     window: {
       registerWebviewViewProvider: (id: string, value: unknown) => {
@@ -174,7 +176,10 @@ async function activateInFixture(t: TestContext, isTrusted = true, failBackupSav
       getConfiguration: (section: string, uri: MockUri) => {
         assert.ok(section === 'agentscope' || section === 'chatgpt'); assert.equal(uri.fsPath, root);
         const values = section === 'agentscope' ? configuration : chatgptConfiguration;
-        return { get: (name: string, fallback: unknown) => Object.hasOwn(values, name) ? values[name] : fallback };
+        return { get: (name: string, fallback: unknown) => Object.hasOwn(values, name) ? values[name] : fallback,
+          update: async (name: string, value: unknown, target: number) => {
+            assert.equal(target, host.ConfigurationTarget.WorkspaceFolder); values[name] = value;
+          } };
       },
       createFileSystemWatcher: (pattern: { base: string; pattern: string }) => {
         assert.equal(pattern.base, root); watcherPatterns.push(pattern.pattern);
@@ -433,7 +438,7 @@ test('Workspace files show existing shared selection and apply an exact file wri
   for (const [file, original] of ui.originals) assert.equal(await ui.read(file), original, 'A resource checkbox only edits the draft');
   await ui.command('apply');
   assert.deepEqual(ui.errors, []);
-  const saved = readAccessRegistry(await ui.read('AGENTS.md'), await ui.read(ACCESS_POLICY_FILE))!;
+  const saved = readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE), ui.root);
   assert.deepEqual(saved.submodules.project, originalProject);
   assert.deepEqual(saved.shared_resources.write_paths, ['Instructions/guide.md']);
   const filesystem = (TOML.parse(await ui.read('.codex/config.toml')) as Record<string, any>).permissions.agentscope.filesystem;
@@ -469,7 +474,7 @@ test('Root files and resource visibility save, reload and restore independently 
   await ui.command('restore');
   assert.deepEqual(ui.errors, []);
   for (const [file, original] of ui.originals) assert.equal(await ui.read(file), original);
-  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
 });
 
 test('Resource messages cannot enter projects, metadata or unsafe paths', async (t) => {
@@ -523,7 +528,7 @@ test('Named presets save drafts without applying and activate access, visibility
   await ui.command('activatePreset');
   assert.deepEqual(ui.errors, []);
   assert.equal(ui.state().preset, 'Editing'); assert.equal(ui.state().dirty, false);
-  let saved = readAccessRegistry(await ui.read('AGENTS.md'), await ui.read(ACCESS_POLICY_FILE))!;
+  let saved = readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE), ui.root);
   assert.deepEqual(saved.shared_resources.write_paths, ['Instructions/guide.md']);
   assert.equal(saved.submodules.project.enabled, false);
   let settings = parseJsoncStrict(await ui.read('.vscode/settings.json'), 'Settings') as Record<string, any>;
@@ -534,7 +539,7 @@ test('Named presets save drafts without applying and activate access, visibility
   await ui.command('activatePreset');
   assert.deepEqual(ui.errors, []);
   assert.equal(ui.state().preset, 'Reading'); assert.equal(ui.state().dirty, false);
-  saved = readAccessRegistry(await ui.read('AGENTS.md'), await ui.read(ACCESS_POLICY_FILE))!;
+  saved = readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE), ui.root);
   assert.deepEqual(saved.shared_resources.write_paths, []);
   settings = parseJsoncStrict(await ui.read('.vscode/settings.json'), 'Settings') as Record<string, any>;
   assert.equal(settings['files.exclude'].Instructions, false);
@@ -578,13 +583,13 @@ test('Explicit Apply uses the selected Codex runtime root and preserves local po
   assert.deepEqual(ui.errors, []);
   const codex = TOML.parse(await ui.read('.codex/config.toml')) as Record<string, any>;
   const filesystem = codex.permissions.agentscope.filesystem;
-  assert.equal(filesystem['/mnt/d/MyApps/.agentscope/access.md'], 'read');
+  assert.equal(filesystem['/mnt/d/MyApps/.agentscope/access.md'], undefined);
   assert.equal(filesystem['/mnt/d/MyApps/project/references'], 'read');
   assert.equal(filesystem['/mnt/d/MyApps/project/drafts'], 'write');
-  assert.equal(filesystem[path.join(ui.root, ACCESS_POLICY_FILE)], undefined);
+  assert.equal(filesystem[path.join(ui.root, SCOPE_CONFIGURATION_FILE)], undefined);
   assert.equal(filesystem[':workspace_roots'], undefined, 'The profile must use only the explicitly selected workspace');
   assert.equal(filesystem['/mnt/d/MyApps'], undefined, 'Mapping does not grant the entire root');
-  assert.equal(readAccessRegistry(await ui.read('AGENTS.md'), await ui.read(ACCESS_POLICY_FILE))!.submodules.project.path, 'project');
+  assert.equal(readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE), ui.root).submodules.project.path, 'project');
   assert.equal(ui.state().dirty, false);
 });
 
@@ -593,8 +598,8 @@ test('Auto with a native Windows runtime explains root reads and grants only sel
   ui.configuration.codexWorkspaceRoot = 'E:\\Remote\\Workspace';
   ui.configuration.codexFilesystemMode = 'auto';
   await ui.toggle(await resourceRow(ui, 'Instructions/guide.md'), 'write', true);
-  assert.match(ui.state().scopeNotice ?? '', /Windows compatibility.*outside selected paths/i);
-  assert.match(ui.state().scopeNotice ?? '', /disabled projects.*readable/i);
+  assert.match(ui.state().scopeNotice ?? '', /Native Windows.*outside selected paths/i);
+  assert.match(ui.state().scopeNotice ?? '', /outside selected paths.*disabled projects/i);
   for (const [file, original] of ui.originals) assert.equal(await ui.read(file), original);
 
   await ui.command('apply');
@@ -611,7 +616,7 @@ test('Auto with a native Windows runtime explains root reads and grants only sel
   assert.equal(filesystem['E:\\Remote\\Workspace'], undefined);
   assert.equal(filesystem[path.join(ui.root, 'Instructions', 'guide.md')], undefined);
   assert.equal(codex.model, 'example-model');
-  const saved = readAccessRegistry(await ui.read('AGENTS.md'), await ui.read(ACCESS_POLICY_FILE))!;
+  const saved = readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE), ui.root);
   assert.equal(saved.submodules.project.enabled, false, 'The compatibility fallback must not enable the disabled project');
   assert.deepEqual(saved.shared_resources.write_paths, ['Instructions/guide.md']);
 });
@@ -626,7 +631,7 @@ test('Cancelling Windows compatibility leaves all policies, config files and rec
   assert.match(ui.confirmations.at(-1)!, /Windows compatibility/i);
   assert.equal(ui.state().dirty, true);
   for (const [file, original] of ui.originals) assert.equal(await ui.read(file), original);
-  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
   assert.equal(ui.backups.size, 0);
   assert.equal(ui.durable.size, 0);
 });
@@ -693,13 +698,13 @@ test('Relevant VS Code setting changes mark a draft and refresh the notice witho
   ui.configuration.codexWorkspaceRoot = '/mnt/e/Remote/Workspace';
   await ui.command('apply');
   const before = new Map<string, string>();
-  for (const file of ['AGENTS.md', ACCESS_POLICY_FILE, '.vscode/settings.json', '.codex/config.toml']) before.set(file, await ui.read(file));
+  for (const file of ['AGENTS.md', SCOPE_CONFIGURATION_FILE, '.vscode/settings.json', '.codex/config.toml']) before.set(file, await ui.read(file));
   const confirmations = ui.confirmations.length;
   ui.fireConfigurationChange('editor.tabSize');
   assert.equal(ui.state().dirty, false, 'Unrelated editor settings must not dirty scope configuration');
   ui.configuration.codexWorkspaceRoot = 'E:\\Remote\\Workspace';
   ui.fireConfigurationChange('agentscope.codexWorkspaceRoot');
-  await ui.waitForState(model => model.dirty && /Windows compatibility/.test(model.scopeNotice ?? ''), 'Native runtime notice');
+  await ui.waitForState(model => model.dirty && /Native Windows/.test(model.scopeNotice ?? ''), 'Native runtime notice');
   for (const [file, original] of before) assert.equal(await ui.read(file), original);
   assert.equal(ui.confirmations.length, confirmations);
 
@@ -723,391 +728,178 @@ test('Runtime changes during Apply confirmation abort before publishing the stal
   assert.equal(ui.errors.length, 1);
   assert.match(ui.errors[0], /runtime.*settings changed.*Preview/i);
   for (const [file, original] of ui.originals) assert.equal(await ui.read(file), original);
-  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
   assert.equal(ui.backups.size, 0);
   assert.equal(ui.durable.size, 0);
   assert.equal(ui.state().dirty, true);
 });
 
-test('Webview commands draft, apply the separate policy and configurations, then restore originals', async (t) => {
+test('Webview commands migrate editor selections, publish config and restore originals', async (t) => {
   const ui = await activateInFixture(t);
   ui.configuration.codexFilesystemMode = 'strict';
-  assert.ok(ui.watcherPatterns.includes(ACCESS_POLICY_FILE), 'Watch external edits to the linked access policy');
-  assert.equal(ui.projectRow().enabled, false);
+  assert.ok(ui.watcherPatterns.includes(SCOPE_CONFIGURATION_FILE));
+  assert.ok(ui.watcherPatterns.includes('.vscode/agentscope-presets.json'));
+  assert.ok(!ui.watcherPatterns.includes('AGENTS.md') && !ui.watcherPatterns.includes('.agentscope/access.md'));
   await ui.command('toggleAccess', 'project');
   await ui.command('toggleVisibility', 'project');
-  assert.equal(ui.state().dirty, true);
-  assert.equal(ui.projectRow().enabled, true);
-  assert.equal(ui.projectRow().hidden, true);
-  for (const [file, original] of ui.originals) { assert.equal(await ui.read(file), original, `Draft wrote ${file}`); }
-
+  for (const [file, original] of ui.originals) assert.equal(await ui.read(file), original);
   await ui.command('apply');
-  assert.deepEqual(ui.errors, []); assert.equal(ui.confirmations.length, 1);
-  const agents = await ui.read('AGENTS.md');
-  const access = await ui.read(ACCESS_POLICY_FILE);
-  assert.equal(readAccessRegistry(agents, access)!.submodules.project.enabled, true);
-  assert.deepEqual(readAgentsRegistry(agents), readAgentsRegistry(ui.originals.get('AGENTS.md')!), 'Keep the original inline registry unchanged as historical content');
-  assert.equal(readAgentsRegistry(agents)!.submodules.project.enabled, false, 'The retained inline settings cannot override the current linked policy');
-  assert.equal(agents.match(/<!-- BEGIN AgentScope access reference -->/g)?.length, 1);
-  assert.match(agents, /\.agentscope\/access\.md/);
-  assert.match(agents, /sole source of AgentScope access settings/);
-  assert.ok(agents.endsWith(ui.originals.get('AGENTS.md')!), 'First Apply must retain every original byte of instructions, legacy rules and inline JSON');
-  const settings = parseJsoncStrict(await ui.read('.vscode/settings.json'), 'Test settings') as Record<string, any>;
-  assert.equal(settings['files.exclude'].project, true); assert.equal(settings['search.exclude'].project, true);
-  assert.equal(settings['files.exclude']['**/.cache'], true); assert.equal(settings['editor.tabSize'], 4);
+  assert.deepEqual(ui.errors, []);
+  assert.equal(ui.confirmations.length, 1);
+  assert.equal(readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE)).submodules.project.enabled, true);
+  assert.match(await ui.read('AGENTS.md'), /Keep my editorial rules/);
+  assert.doesNotMatch(await ui.read('AGENTS.md'), /BEGIN AgentScope|access\.md/);
+  await assert.rejects(fs.stat(path.join(ui.root, '.agentscope/access.md')), { code: 'ENOENT' });
+  const settings = parseJsoncStrict(await ui.read('.vscode/settings.json'), 'Settings') as Record<string, any>;
+  assert.equal(settings['files.exclude'].project, true);
+  assert.equal(settings['search.exclude'].project, true);
+  assert.equal(settings['editor.tabSize'], 4);
   const codex = TOML.parse(await ui.read('.codex/config.toml')) as Record<string, any>;
-  assert.equal(codex.default_permissions, 'agentscope'); assert.equal(codex.model, 'example-model');
-  assert.equal(codex.permissions.agentscope.filesystem[path.join(ui.root, ACCESS_POLICY_FILE)], 'read');
+  assert.equal(codex.default_permissions, 'agentscope');
+  assert.equal(codex.model, 'example-model');
   assert.equal(codex.permissions.agentscope.filesystem[path.join(ui.root, 'project', 'references')], 'read');
   assert.equal(codex.permissions.agentscope.filesystem[path.join(ui.root, 'project', 'drafts')], 'write');
-  assert.equal(ui.state().dirty, false); assert.ok(ui.backups.has(`backup:${ui.root}`));
-  for (const [file, original] of ui.originals) { assert.notEqual(await ui.read(file), original, `${file} did not update`); }
-
+  assert.equal(codex.permissions.agentscope.filesystem[path.join(ui.root, '.agentscope/access.md')], undefined);
+  assert.equal(ui.state().dirty, false);
   await ui.command('restore');
   assert.deepEqual(ui.errors, []);
-  for (const [file, original] of ui.originals) { assert.equal(await ui.read(file), original, `${file} did not restore`); }
-  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
-  assert.equal(ui.projectRow().enabled, false); assert.equal(ui.backups.has(`backup:${ui.root}`), false);
+  for (const [file, original] of ui.originals) assert.equal(await ui.read(file), original);
+  await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
+  assert.equal(ui.projectRow().enabled, false);
 });
 
-test('A second Apply replaces access choices in the sidecar and keeps the main reference stable', async (t) => {
+test('A second Apply updates JSON selections without rewriting user instructions', async (t) => {
   const ui = await activateInFixture(t);
   ui.configuration.generateCodexProfile = false;
-  const readme = await resourceRow(ui, 'README.md');
-  await ui.toggle(readme, 'read', true);
+  await ui.toggle(await resourceRow(ui, 'README.md'), 'read', true);
   await ui.command('apply');
   assert.deepEqual(ui.errors, []);
-  const firstAgents = await ui.read('AGENTS.md');
-  const firstAccess = await ui.read(ACCESS_POLICY_FILE);
-  const firstSettings = await ui.read('.vscode/settings.json');
-  const firstCodex = await ui.read('.codex/config.toml');
-  assert.ok(readAccessRegistry(firstAgents, firstAccess)!.shared_resources.read_paths.includes('README.md'));
-  assert.ok(firstAgents.endsWith(ui.originals.get('AGENTS.md')!));
-  assert.ok(!readAgentsRegistry(firstAgents)!.shared_resources.read_paths.includes('README.md'), 'The old inline registry remains historical rather than being updated');
-
+  const agents = await ui.read('AGENTS.md');
+  const configuration = await ui.read(SCOPE_CONFIGURATION_FILE);
+  const settings = await ui.read('.vscode/settings.json');
+  const codex = await ui.read('.codex/config.toml');
+  assert.ok(readScopeConfiguration(configuration).shared_resources.read_paths.includes('README.md'));
   await ui.toggle(await resourceRow(ui, 'README.md'), 'read', false);
   await ui.command('apply');
   assert.deepEqual(ui.errors, []);
-  assert.equal(await ui.read('AGENTS.md'), firstAgents, 'Permission changes must not rewrite user instructions or the reference');
-  assert.equal(firstAgents.match(/<!-- BEGIN AgentScope access reference -->/g)?.length, 1);
-  const secondAccess = await ui.read(ACCESS_POLICY_FILE);
-  assert.notEqual(secondAccess, firstAccess);
-  assert.ok(!readAccessRegistry(firstAgents, secondAccess)!.shared_resources.read_paths.includes('README.md'));
-  assert.equal(await ui.read('.vscode/settings.json'), firstSettings);
-  assert.equal(await ui.read('.codex/config.toml'), firstCodex);
-
+  assert.equal(await ui.read('AGENTS.md'), agents);
+  assert.ok(!readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE)).shared_resources.read_paths.includes('README.md'));
+  assert.equal(await ui.read('.vscode/settings.json'), settings);
+  assert.equal(await ui.read('.codex/config.toml'), codex);
   await ui.command('restore');
-  assert.deepEqual(ui.errors, []);
-  assert.equal(await ui.read('AGENTS.md'), firstAgents);
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), firstAccess, 'Restore the policy from the previous application');
+  assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), configuration);
   assert.ok((await resourceRow(ui, 'README.md')).read.checked);
 });
 
-test('Custom reference instructions block loading and Apply without changing configuration or the previous backup', async (t) => {
+test('After migration, custom AGENTS text is independent of editor selections', async (t) => {
   const ui = await activateInFixture(t);
   await ui.command('apply');
-  assert.deepEqual(ui.errors, []);
-  const agents = await ui.read('AGENTS.md');
-  const customInstruction = 'Keep every hand-written instruction, including this line.\n';
-  const endMarker = '<!-- END AgentScope access reference -->';
-  const customized = agents.replace(endMarker, `${customInstruction}${endMarker}`);
-  await fs.writeFile(path.join(ui.root, 'AGENTS.md'), customized, 'utf8');
-  const saved = new Map<string, string>();
-  for (const file of ['AGENTS.md', ACCESS_POLICY_FILE, '.vscode/settings.json', '.codex/config.toml']) {
-    saved.set(file, await ui.read(file));
-  }
-  const backup = structuredClone(ui.backups.get(`backup:${ui.root}`));
-  const confirmations = ui.confirmations.length;
-
+  const custom = '# My instructions\n\n<!-- BEGIN AgentScope access reference -->\nMy custom text.\n<!-- END AgentScope access reference -->\n';
+  await fs.writeFile(path.join(ui.root, 'AGENTS.md'), custom);
   await ui.command('refresh');
-  assert.equal(ui.errors.length, 1);
-  assert.match(ui.errors[0], /customized.*access reference/i);
-  assert.match(ui.errors[0], /Move custom text outside.*restore the original/i);
-  assert.equal(ui.state().workspace, path.basename(ui.root), 'A policy failure must retain the selected workspace');
-  assert.match(ui.state().configurationError ?? '', /customized.*access reference/i);
-  assert.deepEqual(ui.state().projects, []);
-  assert.equal(ui.state().resources, undefined);
-  await ui.command('apply');
-  assert.equal(ui.errors.length, 2);
-  assert.equal(ui.confirmations.length, confirmations, 'No rejected operation may reach the Apply confirmation');
-  assert.deepEqual(ui.backups.get(`backup:${ui.root}`), backup);
-  for (const [file, contents] of saved) assert.equal(await ui.read(file), contents, `Custom-reference rejection changed ${file}`);
-
-  // The user repairs the managed reference and keeps their instruction outside it.
-  const repaired = agents.replace(endMarker, `${endMarker}\n\n${customInstruction.trimEnd()}`);
-  await fs.writeFile(path.join(ui.root, 'AGENTS.md'), repaired, 'utf8');
-  await ui.command('refresh');
-  assert.equal(ui.errors.length, 2);
-  assert.equal(ui.state().workspace, path.basename(ui.root));
   assert.equal(ui.state().configurationError, null);
   await ui.toggle(await resourceRow(ui, 'README.md'), 'read', true);
   await ui.command('apply');
-  assert.equal(ui.errors.length, 2);
-  assert.equal(ui.confirmations.length, confirmations + 1);
-  assert.equal(await ui.read('AGENTS.md'), repaired, 'A valid Apply must preserve the user instruction outside the managed block');
-  assert.ok(readAccessRegistry(repaired, await ui.read(ACCESS_POLICY_FILE))!.shared_resources.read_paths.includes('README.md'));
-});
-
-test('Unsaved main or linked policy documents block a sidecar-only Apply before any writes', async (t) => {
-  const ui = await activateInFixture(t);
-  ui.configuration.generateCodexProfile = false;
-  await ui.toggle(await resourceRow(ui, 'README.md'), 'read', true);
-  await ui.command('apply');
-  assert.equal(ui.errors.length, 0);
-  const saved = new Map<string, string>();
-  for (const file of ['AGENTS.md', ACCESS_POLICY_FILE, '.vscode/settings.json', '.codex/config.toml']) {
-    saved.set(file, await ui.read(file));
-  }
-  const previousBackup = structuredClone(ui.backups.get(`backup:${ui.root}`));
-  const confirmationCount = ui.confirmations.length;
-  await ui.toggle(await resourceRow(ui, 'README.md'), 'read', false);
-  for (const file of ['AGENTS.md', ACCESS_POLICY_FILE]) {
-    const filename = path.join(ui.root, file);
-    ui.textDocuments.push({ isDirty: true, uri: MockUri.file(filename), fileName: filename });
-    const errorCount: number = ui.errors.length;
-    await ui.command('apply');
-    assert.equal(ui.errors.length, errorCount + 1);
-    assert.ok(ui.errors.at(-1)!.includes(path.basename(filename)));
-    assert.equal(ui.confirmations.length, confirmationCount);
-    assert.equal(ui.state().dirty, true);
-    for (const [config, contents] of saved) assert.equal(await ui.read(config), contents, `Unsaved ${file} changed ${config}`);
-    assert.deepEqual(ui.backups.get(`backup:${ui.root}`), previousBackup);
-    ui.textDocuments.length = 0;
-  }
-  await ui.command('apply');
-  assert.equal(ui.confirmations.length, confirmationCount + 1);
-  assert.equal(ui.state().dirty, false);
-  assert.ok(!readAccessRegistry(await ui.read('AGENTS.md'), await ui.read(ACCESS_POLICY_FILE))!.shared_resources.read_paths.includes('README.md'));
-});
-
-test('Refreshing a broken linked policy clears stale grants and recovers after explicit repair', async (t) => {
-  for (const failure of ['missing', 'invalid'] as const) {
-    await t.test(failure, async (caseTest) => {
-      const ui = await activateInFixture(caseTest);
-      await ui.command('toggleAccess', 'project');
-      await ui.command('apply');
-      assert.equal(ui.errors.length, 0);
-      assert.equal(ui.projectRow().enabled, true);
-      const oldEpoch = ui.state().workspaceId;
-      const oldScope = structuredClone(ui.scope());
-      const validAccess = await ui.read(ACCESS_POLICY_FILE);
-      const staleFile = await findPathRow(ui, 'references/nested/paper.md');
-      assert.equal(staleFile.read.checked, true);
-      const backup = structuredClone(ui.backups.get(`backup:${ui.root}`));
-      const confirmations = ui.confirmations.length;
-      const saved = new Map<string, string>();
-      for (const file of ['AGENTS.md', '.vscode/settings.json', '.codex/config.toml', 'project/references/nested/paper.md']) {
-        saved.set(file, await ui.read(file));
-      }
-      const policyPath = path.join(ui.root, ACCESS_POLICY_FILE);
-      if (failure === 'missing') await fs.unlink(policyPath);
-      else await fs.writeFile(policyPath, 'This is not a valid AgentScope policy.\n', 'utf8');
-
-      await ui.command('refresh');
-      assert.equal(ui.errors.length, 1);
-      assert.match(ui.errors[0], /access\.md/);
-      const cleared = ui.state();
-      assert.equal(cleared.workspace, path.basename(ui.root));
-      assert.match(cleared.configurationError ?? '', /access\.md/);
-      assert.ok(cleared.workspaceId > oldEpoch, 'Invalidate pending responses and messages from the previous policy');
-      assert.deepEqual(cleared.projects, []);
-      assert.equal(cleared.resources, undefined);
-      assert.equal(cleared.dirty, false);
-      assert.equal(cleared.preset, null);
-
-      const oldMessages = [
-        { type: 'children', workspaceId: oldEpoch, name: 'project', relative: 'references', requestId: 424242 },
-        { type: 'toggle', workspaceId: oldEpoch, name: staleFile.name, relative: staleFile.relative,
-          access: 'write', checked: true, directory: staleFile.directory },
-        { type: 'command', workspaceId: oldEpoch, command: 'apply' },
-        { type: 'command', workspaceId: cleared.workspaceId, command: 'apply' },
-      ];
-      for (const message of oldMessages) {
-        const previousErrors: number = ui.errors.length;
-        await ui.dispatch(message);
-        assert.equal(ui.errors.length, previousErrors + 1);
-        assert.match(ui.errors.at(-1)!, /workspace changed|access\.md|configuration/i);
-        assert.equal(ui.state().workspace, path.basename(ui.root));
-        assert.deepEqual(ui.state().projects, []);
-      }
-      assert.equal(ui.messages.some(message => message.type === 'children' && message.requestId === 424242), false);
-      assert.equal(ui.confirmations.length, confirmations, 'Rejected Apply must not reach its confirmation or backup');
-      assert.deepEqual(ui.backups.get(`backup:${ui.root}`), backup);
-      for (const [file, contents] of saved) assert.equal(await ui.read(file), contents, `A stale message changed ${file}`);
-      if (failure === 'missing') await assert.rejects(fs.stat(policyPath), { code: 'ENOENT' });
-      else assert.equal(await ui.read(ACCESS_POLICY_FILE), 'This is not a valid AgentScope policy.\n');
-
-      // Repair is explicit; Refresh must remain usable from the cleared panel.
-      const errorCount: number = ui.errors.length;
-      const watchedPolicyCount = ui.watcherPatterns.filter(pattern => pattern === ACCESS_POLICY_FILE).length;
-      await fs.writeFile(policyPath, validAccess, 'utf8');
-      await ui.command('refresh');
-      assert.equal(ui.errors.length, errorCount);
-      assert.equal(ui.state().workspace, path.basename(ui.root));
-      assert.equal(ui.state().configurationError, null);
-      assert.ok(ui.state().workspaceId > cleared.workspaceId);
-      assert.deepEqual(ui.scope(), oldScope, 'Reload the repaired registry rather than the failed or stale policy');
-      assert.equal((await findPathRow(ui, staleFile.relative)).read.checked, true);
-      assert.equal(ui.watcherPatterns.filter(pattern => pattern === ACCESS_POLICY_FILE).length, watchedPolicyCount,
-        'Keep the same watchers active across policy failures and successful reloads');
-      assert.equal(ui.activeWatcherPatterns().filter(pattern => pattern === ACCESS_POLICY_FILE).length, 1);
-      assert.equal(await ui.read(ACCESS_POLICY_FILE), validAccess);
-      assert.equal(ui.confirmations.length, confirmations);
-      assert.deepEqual(ui.backups.get(`backup:${ui.root}`), backup);
-      for (const [file, contents] of saved) assert.equal(await ui.read(file), contents);
-    });
-  }
-});
-
-test('Deleting AGENTS.md retains the selected workspace and exact linked scopes until Apply recreates the reference', async (t) => {
-  const ui = await activateInFixture(t, true, false, {
-    enabled: true, read_paths: ['references/nested/paper.md'], write_paths: [],
-  });
-  await ui.command('apply');
   assert.deepEqual(ui.errors, []);
-  const savedScope = structuredClone(ui.scope());
-  const access = await ui.read(ACCESS_POLICY_FILE);
-  const settings = await ui.read('.vscode/settings.json');
-  const codex = await ui.read('.codex/config.toml');
-  const oldEpoch = ui.state().workspaceId;
-  await fs.unlink(path.join(ui.root, 'AGENTS.md'));
-  await ui.emitFileEvent('AGENTS.md', 'delete');
+  assert.equal(await ui.read('AGENTS.md'), custom);
+  assert.ok(readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE)).shared_resources.read_paths.includes('README.md'));
+});
 
+test('Unsaved JSON selections block Apply before any writes', async (t) => {
+  const ui = await activateInFixture(t);
+  await ui.command('apply');
+  const before = await ui.read(SCOPE_CONFIGURATION_FILE);
+  const backup = structuredClone(ui.backups.get('backup:' + ui.root));
+  await ui.toggle(await resourceRow(ui, 'README.md'), 'read', true);
+  const filename = path.join(ui.root, SCOPE_CONFIGURATION_FILE);
+  ui.textDocuments.push({ isDirty: true, uri: MockUri.file(filename), fileName: filename });
+  await ui.command('apply');
+  assert.match(ui.errors.at(-1)!, /save or discard/i);
+  assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), before);
+  assert.deepEqual(ui.backups.get('backup:' + ui.root), backup);
+});
+
+test('Refreshing a corrupt configuration clears stale grants and recovers after repair', async (t) => {
+  const ui = await activateInFixture(t, true, false, { enabled: true });
+  await ui.command('apply');
+  const valid = await ui.read(SCOPE_CONFIGURATION_FILE);
+  const filename = path.join(ui.root, SCOPE_CONFIGURATION_FILE);
+  await fs.writeFile(filename, '{ invalid settings');
+  await ui.command('refresh');
+  assert.ok(ui.state().configurationError);
   assert.equal(ui.state().workspace, path.basename(ui.root));
-  assert.ok(ui.state().workspaceId > oldEpoch);
+  assert.equal(ui.state().projects.length, 0);
+  await fs.writeFile(filename, valid);
+  await ui.command('refresh');
+  assert.equal(ui.state().configurationError, null);
+  assert.equal(ui.scope().enabled, true);
+  assert.equal(ui.activeWatcherPatterns().filter(name => name === SCOPE_CONFIGURATION_FILE).length, 1);
+});
+
+test('Deleting AGENTS.md after migration does not remove scopes or recreate instructions', async (t) => {
+  const ui = await activateInFixture(t, true, false, { enabled: true });
+  await ui.command('apply');
+  const configuration = await ui.read(SCOPE_CONFIGURATION_FILE);
+  const savedScope = structuredClone(ui.scope());
+  await fs.unlink(path.join(ui.root, 'AGENTS.md'));
+  await ui.command('refresh');
   assert.equal(ui.state().configurationError, null);
   assert.deepEqual(ui.scope(), savedScope);
-  assert.equal((await findPathRow(ui, 'references/nested/paper.md')).read.checked, true);
-  assert.equal((await findPathRow(ui, 'references/nested/sibling.md')).read.checked, false);
-  assert.equal(ui.state().dirty, false);
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), access);
-  await assert.rejects(fs.stat(path.join(ui.root, 'AGENTS.md')), { code: 'ENOENT' });
-
   await ui.command('apply');
   assert.deepEqual(ui.errors, []);
-  const agents = await ui.read('AGENTS.md');
-  assert.equal(agents.match(/<!-- BEGIN AgentScope access reference -->/g)?.length, 1);
-  assert.match(agents, /\.agentscope\/access\.md/);
-  assert.doesNotMatch(agents, /```json|Keep my editorial rules/);
-  assert.deepEqual(readAccessRegistry(agents, await ui.read(ACCESS_POLICY_FILE))!.submodules.project, savedScope);
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), access, 'Recreating the reference must preserve the existing policy exactly');
-  assert.equal(await ui.read('.vscode/settings.json'), settings);
-  assert.equal(await ui.read('.codex/config.toml'), codex);
-  const recreated = (ui.backups.get(`backup:${ui.root}`) as Array<{ path: string; before: string | null }>);
-  assert.deepEqual(recreated.map(change => path.relative(ui.root, change.path)), ['AGENTS.md']);
-  assert.equal(recreated[0].before, null, 'The transaction and Restore must use the known absence of AGENTS.md');
+  assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), configuration);
+  await assert.rejects(fs.stat(path.join(ui.root, 'AGENTS.md')), { code: 'ENOENT' });
 });
 
-test('A newly created AGENTS.md during Apply cannot be overwritten by a plan based on its absence', async (t) => {
+test('AGENTS.md created during Apply after migration is left untouched', async (t) => {
   const ui = await activateInFixture(t);
   await ui.command('apply');
-  const access = await ui.read(ACCESS_POLICY_FILE);
-  const previousBackup = structuredClone(ui.backups.get(`backup:${ui.root}`));
   await fs.unlink(path.join(ui.root, 'AGENTS.md'));
-  await ui.emitFileEvent('AGENTS.md', 'delete');
-  const userInstructions = '# My new instructions\n\nKeep this newly created file.\n';
-  ui.beforeApplyConfirmation.push(async () => {
-    await fs.writeFile(path.join(ui.root, 'AGENTS.md'), userInstructions, 'utf8');
-  });
+  await ui.command('refresh');
+  await ui.toggle(await resourceRow(ui, 'README.md'), 'read', true);
+  const custom = '# New instructions\nPreserve this file.\n';
+  ui.beforeApplyConfirmation.push(async () => { await fs.writeFile(path.join(ui.root, 'AGENTS.md'), custom); });
   await ui.command('apply');
-  assert.equal(ui.errors.length, 1);
-  assert.match(ui.errors[0], /changed|conflict/i);
-  assert.match(ui.errors[0], /AGENTS\.md/);
-  assert.equal(await ui.read('AGENTS.md'), userInstructions);
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), access);
-  assert.deepEqual(ui.backups.get(`backup:${ui.root}`), previousBackup);
+  assert.deepEqual(ui.errors, []);
+  assert.equal(await ui.read('AGENTS.md'), custom);
 });
 
-test('Policy watcher failures keep the workspace selected and automatically recover after repair', async (t) => {
-  for (const failure of ['missing', 'invalid'] as const) {
-    await t.test(failure, async caseTest => {
-      const ui = await activateInFixture(caseTest, true, false, {
-        enabled: true, read_paths: ['references/nested/paper.md'], write_paths: [],
-      });
-      await ui.command('apply');
-      const scope = structuredClone(ui.scope());
-      const access = await ui.read(ACCESS_POLICY_FILE);
-      const agents = await ui.read('AGENTS.md');
-      const previousBackup = structuredClone(ui.backups.get(`backup:${ui.root}`));
-      const confirmations = ui.confirmations.length;
-      const policyPath = path.join(ui.root, ACCESS_POLICY_FILE);
-      if (failure === 'missing') await fs.unlink(policyPath);
-      else await fs.writeFile(policyPath, 'Invalid linked policy.\n', 'utf8');
-      await ui.emitFileEvent(ACCESS_POLICY_FILE, failure === 'missing' ? 'delete' : 'change');
-
-      assert.equal(ui.errors.length, 0, 'Background policy errors are shown in the panel without popups');
-      assert.equal(ui.state().workspace, path.basename(ui.root));
-      assert.match(ui.state().configurationError ?? '', /access\.md/);
-      assert.equal(ui.state().message, ui.state().configurationError, 'Show the actual configuration error in the retained workspace');
-      assert.deepEqual(ui.state().projects, []);
-      assert.equal(ui.state().resources, undefined);
-      assert.equal(ui.state().dirty, false);
-      assert.equal(ui.activeWatcherPatterns().filter(pattern => pattern === ACCESS_POLICY_FILE).length, 1);
-      await ui.command('openAccess');
-      assert.equal(ui.openedDocuments.at(-1)?.fsPath, policyPath, 'The policy repair command must work without valid scope state');
-      await ui.command('openAgents');
-      assert.equal(ui.openedDocuments.at(-1)?.fsPath, path.join(ui.root, 'AGENTS.md'));
-      await ui.command('openCodex');
-      assert.equal(ui.openedDocuments.at(-1)?.fsPath, path.join(ui.root, '.codex', 'config.toml'));
-      assert.equal(ui.errors.length, 0);
-      await ui.command('apply');
-      assert.equal(ui.errors.length, 1);
-      assert.equal(ui.confirmations.length, confirmations);
-      assert.deepEqual(ui.backups.get(`backup:${ui.root}`), previousBackup);
-      assert.equal(await ui.read('AGENTS.md'), agents);
-      if (failure === 'missing') await assert.rejects(fs.stat(policyPath), { code: 'ENOENT' });
-      else assert.equal(await ui.read(ACCESS_POLICY_FILE), 'Invalid linked policy.\n');
-
-      await fs.writeFile(policyPath, access, 'utf8');
-      await ui.emitFileEvent(ACCESS_POLICY_FILE, failure === 'missing' ? 'create' : 'change');
-      assert.equal(ui.errors.length, 1);
-      assert.equal(ui.state().workspace, path.basename(ui.root));
-      assert.equal(ui.state().configurationError, null);
-      assert.deepEqual(ui.scope(), scope);
-      assert.equal((await findPathRow(ui, 'references/nested/paper.md')).read.checked, true);
-      assert.equal((await findPathRow(ui, 'references/nested/sibling.md')).read.checked, false);
-      assert.equal(ui.activeWatcherPatterns().filter(pattern => pattern === ACCESS_POLICY_FILE).length, 1);
-      assert.deepEqual(ui.backups.get(`backup:${ui.root}`), previousBackup);
-      assert.equal(await ui.read('AGENTS.md'), agents);
-      assert.equal(await ui.read(ACCESS_POLICY_FILE), access);
-    });
-  }
+test('Configuration watcher failures retain the workspace and automatically recover after repair', async (t) => {
+  const ui = await activateInFixture(t, true, false, { enabled: true });
+  await ui.command('apply');
+  const valid = await ui.read(SCOPE_CONFIGURATION_FILE);
+  await fs.writeFile(path.join(ui.root, SCOPE_CONFIGURATION_FILE), '{ invalid settings');
+  await ui.emitFileEvent(SCOPE_CONFIGURATION_FILE);
+  assert.ok(ui.state().configurationError);
+  assert.equal(ui.state().projects.length, 0);
+  assert.equal(ui.state().workspace, path.basename(ui.root));
+  assert.deepEqual(ui.errors, [], 'Background watcher failures stay in the panel');
+  await ui.nativeCommand('openConfiguration');
+  assert.equal(ui.openedDocuments.at(-1)?.fsPath, path.join(ui.root, SCOPE_CONFIGURATION_FILE));
+  await fs.writeFile(path.join(ui.root, SCOPE_CONFIGURATION_FILE), valid);
+  await ui.emitFileEvent(SCOPE_CONFIGURATION_FILE);
+  assert.equal(ui.state().configurationError, null);
+  assert.equal(ui.scope().enabled, true);
+  assert.equal(ui.activeWatcherPatterns().filter(name => name === SCOPE_CONFIGURATION_FILE).length, 1);
 });
 
-test('An initially missing access policy stays inline without startup notifications or automatic repairs', async (t) => {
-  const expected = registry({ project: project({ enabled: true, read_paths: ['references/nested/paper.md'], write_paths: [] }) });
-  const files = writeAccessFiles(policy(expected), null, expected);
+test('A missing legacy sidecar stays visible as a migration error until explicitly repaired', async (t) => {
+  const saved = writeAccessFiles(policy(registry()), null, registry());
   const ui = await activateInFixture(t, true, false, {}, async root => {
     await fs.mkdir(path.join(root, '.agentscope'));
-    await fs.writeFile(path.join(root, 'AGENTS.md'), files.agents, 'utf8');
+    await fs.writeFile(path.join(root, 'AGENTS.md'), saved.agents);
   });
-  assert.equal(ui.errors.length, 0);
-  assert.deepEqual(ui.informationMessages, []);
-  assert.deepEqual(ui.quickPickPrompts, []);
+  assert.ok(ui.state().configurationError);
   assert.equal(ui.state().workspace, path.basename(ui.root));
-  assert.match(ui.state().configurationError ?? '', /access\.md/);
-  assert.deepEqual(ui.state().projects, []);
-  assert.equal(ui.state().resources, undefined);
-  assert.equal(ui.activeWatcherPatterns().length, 5, 'Initial policy loading failures must leave repair events subscribed');
-  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
-
-  await ui.nativeCommand('refresh');
-  assert.equal(ui.errors.length, 1, 'An explicit failed Refresh reports its error once');
-  assert.match(ui.errors[0], /access\.md/);
-  assert.equal(ui.state().configurationError !== null, true);
-  assert.equal(await ui.read('AGENTS.md'), files.agents);
-  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
-
-  await fs.writeFile(path.join(ui.root, ACCESS_POLICY_FILE), files.access, 'utf8');
-  await ui.emitFileEvent(ACCESS_POLICY_FILE, 'create');
-  assert.equal(ui.errors.length, 1);
+  assert.deepEqual(ui.errors, []);
+  await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
+  await fs.writeFile(path.join(ui.root, '.agentscope/access.md'), saved.access);
+  await ui.command('refresh');
   assert.equal(ui.state().configurationError, null);
-  assert.deepEqual(ui.scope(), expected.submodules.project);
-  assert.equal((await findPathRow(ui, 'references/nested/sibling.md')).read.checked, false);
-  assert.equal(await ui.read('AGENTS.md'), files.agents);
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), files.access);
-  assert.equal(ui.confirmations.length, 0);
-  assert.equal(ui.backups.size, 0);
+  await ui.command('apply');
+  assert.deepEqual(ui.errors, []);
+  assert.equal(await ui.read('.agentscope/access.md'), saved.access);
+  assert.equal(readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE)).submodules.project.enabled, true);
 });
 
 test('Multi-root startup waits for an explicit workspace selection without opening a picker', async (t) => {
@@ -1119,7 +911,7 @@ test('Multi-root startup waits for an explicit workspace selection without openi
   assert.deepEqual(ui.informationMessages, []);
   assert.equal(ui.activeWatcherPatterns().length, 0);
   assert.equal(await ui.read('AGENTS.md'), ui.originals.get('AGENTS.md'));
-  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
 
   await ui.nativeCommand('selectWorkspace');
   assert.equal(ui.quickPickPrompts.length, 1);
@@ -1128,45 +920,27 @@ test('Multi-root startup waits for an explicit workspace selection without openi
   assert.deepEqual(ui.errors, []);
 });
 
-test('Delete and create events arriving during a workspace load queue a fresh snapshot instead of losing the latest policy', async (t) => {
-  const ui = await activateInFixture(t, true, false, {
-    enabled: true, read_paths: ['references/nested/paper.md'], write_paths: [],
-  });
+test('Delete and create events during load queue the latest configuration snapshot', async (t) => {
+  const ui = await activateInFixture(t);
   await ui.command('apply');
+  const valid = await ui.read(SCOPE_CONFIGURATION_FILE);
+  const gate = ui.pauseNextLoadedSnapshot();
+  const before = ui.state().workspaceId;
+  ui.fireFileEvent(SCOPE_CONFIGURATION_FILE);
+  await gate.started;
+  try {
+    await fs.unlink(path.join(ui.root, SCOPE_CONFIGURATION_FILE));
+    ui.fireFileEvent(SCOPE_CONFIGURATION_FILE, 'delete');
+    await fs.writeFile(path.join(ui.root, SCOPE_CONFIGURATION_FILE), '{ latest invalid');
+    ui.fireFileEvent(SCOPE_CONFIGURATION_FILE, 'create');
+  } finally { gate.release(); }
+  await ui.waitForState(model => !!model.configurationError && !model.busy, 'Latest configuration error');
+  assert.ok(ui.state().workspaceId > before);
   assert.deepEqual(ui.errors, []);
-  const savedScope = structuredClone(ui.scope());
-  const access = await ui.read(ACCESS_POLICY_FILE);
-  const agents = await ui.read('AGENTS.md');
-  const oldEpoch = ui.state().workspaceId;
-  const paused = ui.pauseNextLoadedSnapshot();
-  ui.fireFileEvent('AGENTS.md', 'change');
-  await paused.started;
-  assert.equal(ui.state().busy, true);
-
-  await fs.unlink(path.join(ui.root, 'AGENTS.md'));
-  ui.fireFileEvent('AGENTS.md', 'delete');
-  await fs.unlink(path.join(ui.root, ACCESS_POLICY_FILE));
-  ui.fireFileEvent(ACCESS_POLICY_FILE, 'delete');
-  await fs.writeFile(path.join(ui.root, 'AGENTS.md'), agents, 'utf8');
-  ui.fireFileEvent('AGENTS.md', 'create');
-  await fs.writeFile(path.join(ui.root, ACCESS_POLICY_FILE), 'Latest invalid policy.\n', 'utf8');
-  ui.fireFileEvent(ACCESS_POLICY_FILE, 'create');
-  const failed = ui.waitForState(model => !model.busy && model.workspaceId > oldEpoch && !!model.configurationError,
-    'Queued watcher must reread the latest invalid policy');
-  paused.release();
-  await failed;
-  await new Promise<void>(resolve => setImmediate(resolve));
-  assert.equal(ui.errors.length, 0, 'Queued background reload errors remain inline');
-  assert.equal(ui.state().workspace, path.basename(ui.root));
-  assert.deepEqual(ui.state().projects, []);
-  assert.equal(ui.state().resources, undefined);
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), 'Latest invalid policy.\n');
-
-  await fs.writeFile(path.join(ui.root, ACCESS_POLICY_FILE), access, 'utf8');
-  await ui.emitFileEvent(ACCESS_POLICY_FILE, 'change');
+  await fs.writeFile(path.join(ui.root, SCOPE_CONFIGURATION_FILE), valid);
+  await ui.emitFileEvent(SCOPE_CONFIGURATION_FILE);
   assert.equal(ui.state().configurationError, null);
-  assert.deepEqual(ui.scope(), savedScope);
-  assert.equal(ui.activeWatcherPatterns().length, 5, 'Retain one active subscription per configuration input');
+  assert.equal(ui.activeWatcherPatterns().length, 5);
 });
 
 test('Untrusted webview commands and permission checkboxes cannot write configuration', async (t) => {
@@ -1213,7 +987,7 @@ test('A same-row read checkbox resets disabled whole-project grants and applies 
 
   await ui.command('apply');
   assert.deepEqual(ui.errors, []);
-  const saved = readAccessRegistry(await ui.read('AGENTS.md'), await ui.read(ACCESS_POLICY_FILE))!.submodules.project;
+  const saved = readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE), ui.root).submodules.project;
   assert.deepEqual(saved.read_paths, [relative]); assert.deepEqual(saved.write_paths, []);
   const codex = TOML.parse(await ui.read('.codex/config.toml')) as Record<string, any>;
   const filesystem = codex.permissions.agentscope.filesystem;
@@ -1244,7 +1018,7 @@ test('A same-row write checkbox implies read and clearing read removes writable 
   await ui.toggle(file, 'write', true);
   await ui.command('apply');
   assert.deepEqual(ui.errors, []);
-  const saved = readAccessRegistry(await ui.read('AGENTS.md'), await ui.read(ACCESS_POLICY_FILE))!.submodules.project;
+  const saved = readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE), ui.root).submodules.project;
   assert.deepEqual(saved.read_paths, []); assert.deepEqual(saved.write_paths, [relative]);
   const codex = TOML.parse(await ui.read('.codex/config.toml')) as Record<string, any>;
   const filesystem = codex.permissions.agentscope.filesystem;
@@ -1306,41 +1080,30 @@ test('Messages from an earlier workspace epoch cannot select files or Apply', as
   for (const [config, original] of ui.originals) { assert.equal(await ui.read(config), original); }
 });
 
-test('A successful Apply checkpoints exact policy bytes outside the workspace and survives restart with both files deleted', async (t) => {
-  const ui = await activateInFixture(t, true, false, {
-    enabled: true, read_paths: ['references/nested/paper.md'], write_paths: [],
-  });
-  assert.equal(ui.state().recoveryAvailable, false, 'Legacy instructions alone are not a complete saved policy pair');
+test('Apply checkpoints exact JSON selections and recovers after deletion without instruction files', async (t) => {
+  const ui = await activateInFixture(t, true, false, { enabled: true, read_paths: ['references/nested/paper.md'], write_paths: [] });
   await ui.command('apply');
-  assert.deepEqual(ui.errors, []);
-  const agents = await ui.read('AGENTS.md');
-  const access = await ui.read(ACCESS_POLICY_FILE);
+  const configuration = await ui.read(SCOPE_CONFIGURATION_FILE);
   const selected = structuredClone(ui.scope());
   const checkpoint = structuredClone(ui.durable.get(checkpointKey(ui.root)));
   const saved = validateCheckpoint(checkpoint, ui.root);
-  assert.equal(saved.agents, agents); assert.equal(saved.access, access);
-  assert.equal(ui.state().recoveryAvailable, true);
-
+  assert.equal(saved.version, 2);
+  assert.equal(saved.configuration, configuration);
+  await fs.unlink(path.join(ui.root, SCOPE_CONFIGURATION_FILE));
   await fs.unlink(path.join(ui.root, 'AGENTS.md'));
-  await fs.unlink(path.join(ui.root, ACCESS_POLICY_FILE));
   ui.backups.clear();
   await ui.restart();
-  assert.equal(ui.state().workspace, path.basename(ui.root));
-  assert.equal(ui.state().recoveryAvailable, true, 'Recovery must use persistent extension storage even when Undo and both files are gone');
-  assert.deepEqual(ui.durable.get(checkpointKey(ui.root)), checkpoint, 'Empty default configuration cannot replace a complete checkpoint');
-  assert.ok(ui.state().projects.every(row => !row.enabled), 'Deletion must never silently reactivate the saved access');
-  await assert.rejects(fs.stat(path.join(ui.root, 'AGENTS.md')), { code: 'ENOENT' });
-  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
-
+  assert.equal(ui.state().recoveryAvailable, true);
+  assert.ok(ui.state().projects.every(row => !row.enabled));
   await ui.command('recover');
   assert.deepEqual(ui.errors, []);
-  assert.equal(await ui.read('AGENTS.md'), agents);
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), access);
+  assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), configuration);
   assert.deepEqual(ui.scope(), selected);
-  assert.equal((await findPathRow(ui, 'references/nested/paper.md')).read.checked, true);
-  assert.equal((await findPathRow(ui, 'references/nested/sibling.md')).read.checked, false);
-  const undo = ui.backups.get(`backup:${ui.root}`) as Array<{ path: string; before: string | null }>;
-  assert.equal(undo.length, 2); assert.ok(undo.every(change => change.before === null));
+  await assert.rejects(fs.stat(path.join(ui.root, 'AGENTS.md')), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(ui.root, '.agentscope/access.md')), { code: 'ENOENT' });
+  const undo = ui.backups.get('backup:' + ui.root) as Array<{path: string; before: string | null}>;
+  assert.equal(undo.length, 1);
+  assert.equal(undo[0].before, null);
 });
 
 test('Recovery restores a corrupt policy from an error panel and Undo returns the exact corrupt bytes', async (t) => {
@@ -1348,12 +1111,12 @@ test('Recovery restores a corrupt policy from an error panel and Undo returns th
   await ui.toggle(await findPathRow(ui, 'references/nested/paper.md'), 'write', true);
   await ui.command('apply');
   const agents = await ui.read('AGENTS.md');
-  const access = await ui.read(ACCESS_POLICY_FILE);
+  const access = await ui.read(SCOPE_CONFIGURATION_FILE);
   const settings = await ui.read('.vscode/settings.json');
   const codex = await ui.read('.codex/config.toml');
   const checkpoint = structuredClone(ui.durable.get(checkpointKey(ui.root)));
   const corrupt = 'Broken access settings: { definitely not a registry\n';
-  await fs.writeFile(path.join(ui.root, ACCESS_POLICY_FILE), corrupt, 'utf8');
+  await fs.writeFile(path.join(ui.root, SCOPE_CONFIGURATION_FILE), corrupt, 'utf8');
   await ui.command('refresh');
   assert.ok(ui.state().configurationError);
   assert.equal(ui.state().recoveryAvailable, true);
@@ -1363,12 +1126,12 @@ test('Recovery restores a corrupt policy from an error panel and Undo returns th
   await ui.command('recover');
   assert.equal(ui.errors.length, 1);
   assert.equal(ui.state().configurationError, null);
-  assert.equal(await ui.read('AGENTS.md'), agents); assert.equal(await ui.read(ACCESS_POLICY_FILE), access);
+  assert.equal(await ui.read('AGENTS.md'), agents); assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), access);
   assert.equal(await ui.read('.vscode/settings.json'), settings); assert.equal(await ui.read('.codex/config.toml'), codex);
   assert.equal((await findPathRow(ui, 'references/nested/paper.md')).write.checked, true);
 
   await ui.command('restore');
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), corrupt, 'Undo Recovery must preserve the overwritten corrupt file for review');
+  assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), corrupt, 'Undo Recovery must preserve the overwritten corrupt file for review');
   assert.equal(await ui.read('AGENTS.md'), agents);
   assert.ok(ui.state().configurationError);
   assert.equal(ui.state().recoveryAvailable, true);
@@ -1380,7 +1143,7 @@ test('Apply cannot write any workspace file when checkpoint persistence fails', 
   await ui.command('apply');
   const checkpoint = structuredClone(ui.durable.get(checkpointKey(ui.root)));
   const files = new Map<string, string>();
-  for (const file of ['AGENTS.md', ACCESS_POLICY_FILE, '.vscode/settings.json', '.codex/config.toml']) files.set(file, await ui.read(file));
+  for (const file of ['AGENTS.md', SCOPE_CONFIGURATION_FILE, '.vscode/settings.json', '.codex/config.toml']) files.set(file, await ui.read(file));
   await ui.toggle(await resourceRow(ui, 'README.md'), 'write', true);
   ui.storageControl.failCheckpointSave = true;
   await ui.command('apply');
@@ -1391,58 +1154,46 @@ test('Apply cannot write any workspace file when checkpoint persistence fails', 
   for (const [file, text] of files) assert.equal(await ui.read(file), text, `Failed checkpoint persistence changed ${file}`);
 });
 
-test('Recovery respects unsaved policy editors and cannot write before its Undo backup is persisted', async (t) => {
-  const savedRegistry = registry({ project: project({ enabled: true, read_paths: ['references/nested/paper.md'], write_paths: [] }) });
-  const saved = writeAccessFiles(policy(savedRegistry), null, savedRegistry);
+test('Recovery respects unsaved configuration editors and persists Undo before writing', async (t) => {
+  const savedRegistry = registry({ project: project({ enabled: true }) });
+  const saved = writeScopeConfiguration(null, savedRegistry);
   for (const reason of ['unsaved editor', 'backup storage failure'] as const) await t.test(reason, async caseTest => {
     const ui = await activateInFixture(caseTest, true, reason === 'backup storage failure', {}, async root => {
-      await fs.mkdir(path.join(root, '.agentscope'));
-      await fs.writeFile(path.join(root, 'AGENTS.md'), saved.agents, 'utf8');
-      await fs.writeFile(path.join(root, ACCESS_POLICY_FILE), saved.access, 'utf8');
+      await fs.writeFile(path.join(root, SCOPE_CONFIGURATION_FILE), saved);
     });
-    assert.deepEqual(ui.errors, []); assert.equal(ui.state().recoveryAvailable, true, 'A complete valid initial load is checkpointed');
+    assert.deepEqual(ui.errors, []);
+    assert.equal(ui.state().recoveryAvailable, true);
     const checkpoint = structuredClone(ui.durable.get(checkpointKey(ui.root)));
-    const corrupt = 'Damaged policy contents must survive failed recovery.\n';
-    await fs.writeFile(path.join(ui.root, ACCESS_POLICY_FILE), corrupt, 'utf8');
+    const corrupt = '{ damaged selections';
+    await fs.writeFile(path.join(ui.root, SCOPE_CONFIGURATION_FILE), corrupt);
     await ui.command('refresh');
-    assert.equal(ui.errors.length, 1);
     if (reason === 'unsaved editor') {
-      const filename = path.join(ui.root, 'AGENTS.md');
+      const filename = path.join(ui.root, SCOPE_CONFIGURATION_FILE);
       ui.textDocuments.push({ isDirty: true, uri: MockUri.file(filename), fileName: filename });
     }
     await ui.command('recover');
     assert.equal(ui.errors.length, 2);
-    assert.match(ui.errors.at(-1)!, reason === 'unsaved editor' ? /AGENTS\.md|unsaved|save/i : /workspace-state storage failure/);
-    assert.equal(await ui.read('AGENTS.md'), saved.agents);
-    assert.equal(await ui.read(ACCESS_POLICY_FILE), corrupt);
+    assert.match(ui.errors.at(-1)!, reason === 'unsaved editor' ? /unsaved|save/i : /workspace-state storage failure/);
+    assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), corrupt);
     assert.deepEqual(ui.durable.get(checkpointKey(ui.root)), checkpoint);
-    assert.equal(ui.backups.size, 0);
   });
 });
 
-test('A full previous Apply backup can bootstrap durable recovery while an incomplete backup cannot', async (t) => {
-  const savedRegistry = registry({ project: project({ enabled: true, read_paths: ['references/nested/paper.md'], write_paths: [] }) });
-  const saved = writeAccessFiles(policy(savedRegistry), null, savedRegistry);
-  for (const fullPair of [true, false]) await t.test(fullPair ? 'complete' : 'incomplete', async caseTest => {
-    const ui = await activateInFixture(caseTest, true, false, {}, async root => {
-      await fs.unlink(path.join(root, 'AGENTS.md'));
-    }, { initialBackup: root => [
-      { path: path.join(root, 'AGENTS.md'), before: null, after: saved.agents },
-      ...(fullPair ? [{ path: path.join(root, ACCESS_POLICY_FILE), before: null, after: saved.access }] : []),
-    ] });
-    assert.equal(ui.state().recoveryAvailable, fullPair);
-    assert.equal(ui.durable.has(checkpointKey(ui.root)), fullPair);
-    if (!fullPair) {
-      await ui.command('recover');
-      assert.equal(ui.errors.length, 1);
-      await assert.rejects(fs.stat(path.join(ui.root, 'AGENTS.md')), { code: 'ENOENT' });
-      return;
-    }
-    await ui.command('recover');
-    assert.deepEqual(ui.errors, []);
-    assert.equal(await ui.read('AGENTS.md'), saved.agents); assert.equal(await ui.read(ACCESS_POLICY_FILE), saved.access);
-    assert.deepEqual(ui.scope(), savedRegistry.submodules.project);
-  });
+test('A complete legacy Apply backup imports selections without restoring legacy policy files', async (t) => {
+  const selected = registry({ project: project({ enabled: true }) });
+  const saved = writeAccessFiles(policy(selected), null, selected);
+  const ui = await activateInFixture(t, true, false, {}, async root => {
+    await fs.unlink(path.join(root, 'AGENTS.md'));
+  }, { initialBackup: root => [
+    { path: path.join(root, 'AGENTS.md'), before: null, after: saved.agents },
+    { path: path.join(root, '.agentscope/access.md'), before: null, after: saved.access },
+  ] });
+  assert.equal(ui.state().recoveryAvailable, true);
+  await ui.command('recover');
+  assert.deepEqual(ui.errors, []);
+  assert.deepEqual(readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE)), selected);
+  await assert.rejects(fs.stat(path.join(ui.root, 'AGENTS.md')), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(ui.root, '.agentscope/access.md')), { code: 'ENOENT' });
 });
 
 test('Corrupt durable checkpoints remain unavailable and cannot write policy files', async (t) => {
@@ -1452,9 +1203,9 @@ test('Corrupt durable checkpoints remain unavailable and cannot write policy fil
   assert.equal(ui.state().recoveryAvailable, false);
   const originalSettings = await ui.read('.vscode/settings.json');
   await ui.command('recover');
-  assert.ok(ui.errors.some(message => /checkpoint|saved|recover/i.test(message)));
+  assert.equal(ui.errors.length, 1, 'An invalid saved checkpoint must be rejected');
   await assert.rejects(fs.stat(path.join(ui.root, 'AGENTS.md')), { code: 'ENOENT' });
-  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
   assert.equal(await ui.read('.vscode/settings.json'), originalSettings);
 });
 
@@ -1464,7 +1215,7 @@ test('Recovery and reconfiguration reject stale panel messages and Restricted Mo
   const oldEpoch = ui.state().workspaceId;
   await ui.command('refresh');
   const files = new Map<string, string>();
-  for (const file of ['AGENTS.md', ACCESS_POLICY_FILE, '.vscode/settings.json', '.codex/config.toml']) files.set(file, await ui.read(file));
+  for (const file of ['AGENTS.md', SCOPE_CONFIGURATION_FILE, '.vscode/settings.json', '.codex/config.toml']) files.set(file, await ui.read(file));
   for (const command of ['recover', 'reconfigure']) await ui.dispatch({ type: 'command', workspaceId: oldEpoch, command });
   assert.equal(ui.errors.length, 2); assert.ok(ui.errors.every(message => /workspace changed/i.test(message)));
   assert.equal(ui.state().dirty, false);
@@ -1483,7 +1234,7 @@ test('Reconfigure turns corrupt policy into an empty editable draft and Apply ke
   const agents = `${await ui.read('AGENTS.md')}\n${userText}`;
   const broken = 'This is a broken access file that should remain until Apply.\n';
   await fs.writeFile(path.join(ui.root, 'AGENTS.md'), agents, 'utf8');
-  await fs.writeFile(path.join(ui.root, ACCESS_POLICY_FILE), broken, 'utf8');
+  await fs.writeFile(path.join(ui.root, SCOPE_CONFIGURATION_FILE), broken, 'utf8');
   await ui.command('refresh');
   assert.equal(ui.errors.length, 1); assert.ok(ui.state().configurationError);
   await ui.command('reconfigure');
@@ -1492,21 +1243,21 @@ test('Reconfigure turns corrupt policy into an empty editable draft and Apply ke
   assert.equal(ui.scope().enabled, false);
   assert.deepEqual(ui.scope().read_paths, []); assert.deepEqual(ui.scope().write_paths, []);
   assert.deepEqual(ui.state().resources!.scope!.read_paths, []); assert.deepEqual(ui.state().resources!.scope!.write_paths, []);
-  assert.equal(await ui.read('AGENTS.md'), agents); assert.equal(await ui.read(ACCESS_POLICY_FILE), broken, 'Reconfigure only creates a draft');
+  assert.equal(await ui.read('AGENTS.md'), agents); assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), broken, 'Reconfigure only creates a draft');
 
   const selectedPath = 'references/nested/sibling.md';
   await ui.toggle(await findPathRow(ui, selectedPath), 'write', true);
   await ui.command('apply');
   assert.equal(ui.errors.length, 1); assert.equal(ui.state().configurationError, null);
   assert.ok((await ui.read('AGENTS.md')).includes(userText));
-  const selected = readAccessRegistry(await ui.read('AGENTS.md'), await ui.read(ACCESS_POLICY_FILE))!;
+  const selected = readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE), ui.root);
   assert.deepEqual(selected.submodules.project.write_paths, [selectedPath]);
   assert.deepEqual(selected.submodules.project.read_paths, []); assert.deepEqual(selected.shared_resources.read_paths, []);
   assert.equal((await findPathRow(ui, 'references/nested/paper.md')).read.checked, false);
   assert.equal((await findPathRow(ui, selectedPath)).write.checked, true);
   assert.equal(ui.state().recoveryAvailable, true);
   await ui.command('restore');
-  assert.equal(await ui.read('AGENTS.md'), agents); assert.equal(await ui.read(ACCESS_POLICY_FILE), broken);
+  assert.equal(await ui.read('AGENTS.md'), agents); assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), broken);
 });
 
 test('A new ordinary project without configuration starts disabled and creates policies on its first precise Apply', async (t) => {
@@ -1523,7 +1274,7 @@ test('A new ordinary project without configuration starts disabled and creates p
   await ui.toggle(await findPathRow(ui, selectedPath, rootProject.name), 'read', true);
   await ui.command('apply');
   assert.deepEqual(ui.errors, []); assert.equal(ui.state().dirty, false); assert.equal(ui.state().recoveryAvailable, true);
-  const saved = readAccessRegistry(await ui.read('AGENTS.md'), await ui.read(ACCESS_POLICY_FILE))!;
+  const saved = readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE), ui.root);
   assert.equal(saved.submodules[rootProject.name].enabled, true);
   assert.deepEqual(saved.submodules[rootProject.name].read_paths, [selectedPath]);
   assert.deepEqual(saved.submodules[rootProject.name].write_paths, []);
@@ -1539,18 +1290,18 @@ test('Failed Apply and failed staging cleanup cannot replace the committed good 
   await ui.command('apply');
   const savedKey = checkpointKey(ui.root);
   const good = structuredClone(ui.durable.get(savedKey));
-  const access = await ui.read(ACCESS_POLICY_FILE);
-  const main = await ui.read('AGENTS.md');
+  const access = await ui.read(SCOPE_CONFIGURATION_FILE);
+  const main = await ui.read(SCOPE_CONFIGURATION_FILE);
   await ui.toggle(await resourceRow(ui, 'README.md'), 'write', true);
   ui.storageControl.failPendingCleanup = true;
-  ui.beforeApplyConfirmation.push(() => fs.writeFile(path.join(ui.root, 'AGENTS.md'), main + '\nPreserve my competing edit.\n', 'utf8'));
+  ui.beforeApplyConfirmation.push(() => fs.writeFile(path.join(ui.root, SCOPE_CONFIGURATION_FILE), main + '\nPreserve my competing edit.\n', 'utf8'));
   await ui.command('apply');
   assert.equal(ui.errors.length, 1);
   assert.match(ui.errors[0], /changed.*refresh.*cleanup also failed/is);
   assert.deepEqual(ui.durable.get(savedKey), good);
   assert.ok(ui.durable.has(`${savedKey}.pending`), 'Prepared data remains distinguishable from committed data');
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), access);
-  assert.equal(await ui.read('AGENTS.md'), main + '\nPreserve my competing edit.\n');
+  assert.notEqual(await ui.read(SCOPE_CONFIGURATION_FILE), access, 'Preserve the competing edit without publishing the planned selections');
+  assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), main + '\nPreserve my competing edit.\n');
 });
 
 test('An unfinished staged Apply cannot bootstrap recovery from its pre-write Undo record', async (t) => {
@@ -1560,7 +1311,7 @@ test('An unfinished staged Apply cannot bootstrap recovery from its pre-write Un
     initialPending: root => ({ version: 1, root, agents: saved.agents, access: saved.access, savedAt: new Date().toISOString() }),
     initialBackup: root => [
       { path: path.join(root, 'AGENTS.md'), before: null, after: saved.agents },
-      { path: path.join(root, ACCESS_POLICY_FILE), before: null, after: saved.access },
+      { path: path.join(root, '.agentscope/access.md'), before: null, after: saved.access },
     ],
   });
   assert.equal(ui.state().recoveryAvailable, false);
@@ -1570,13 +1321,13 @@ test('An unfinished staged Apply cannot bootstrap recovery from its pre-write Un
   await ui.command('recover');
   assert.equal(ui.errors.length, 1);
   await assert.rejects(fs.stat(path.join(ui.root, 'AGENTS.md')), { code: 'ENOENT' });
-  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
 });
 
 test('Recovery locks registered commands before awaiting policy reads', async (t) => {
   const ui = await activateInFixture(t);
   await ui.command('apply');
-  await fs.writeFile(path.join(ui.root, ACCESS_POLICY_FILE), 'Corrupt policy\n', 'utf8');
+  await fs.writeFile(path.join(ui.root, SCOPE_CONFIGURATION_FILE), 'Corrupt policy\n', 'utf8');
   await ui.command('refresh');
   let enter!: () => void; let release!: () => void;
   const entered = new Promise<void>(resolve => { enter = resolve; });
@@ -1584,7 +1335,7 @@ test('Recovery locks registered commands before awaiting policy reads', async (t
   const readFile = fs.readFile.bind(fs);
   let intercepted = false;
   t.mock.method(fs, 'readFile', async (...args: Parameters<typeof fs.readFile>) => {
-    if (!intercepted && String(args[0]) === path.join(ui.root, 'AGENTS.md')) {
+    if (!intercepted && String(args[0]) === path.join(ui.root, SCOPE_CONFIGURATION_FILE)) {
       intercepted = true; enter(); await held;
     }
     return readFile(...args);
@@ -1602,35 +1353,35 @@ test('Recovery locks registered commands before awaiting policy reads', async (t
   assert.equal(ui.state().configurationError, null);
 });
 
-test('An unchanged Apply still refuses externally deleted policy inputs', async (t) => {
+test('An unchanged Apply refuses externally deleted JSON selections', async (t) => {
   const ui = await activateInFixture(t);
   await ui.command('apply');
   const checkpoint = structuredClone(ui.durable.get(checkpointKey(ui.root)));
-  await fs.unlink(path.join(ui.root, 'AGENTS.md'));
+  await fs.unlink(path.join(ui.root, SCOPE_CONFIGURATION_FILE));
   await ui.command('apply');
   assert.equal(ui.errors.length, 1);
   assert.match(ui.errors[0], /input changed.*refresh/i);
   assert.deepEqual(ui.durable.get(checkpointKey(ui.root)), checkpoint);
-  await assert.rejects(fs.stat(path.join(ui.root, 'AGENTS.md')), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
 });
 
 test('Recovery remains undoable from a configuration error panel when unrelated settings are malformed', async (t) => {
   const ui = await activateInFixture(t);
   await ui.command('apply');
-  const savedPolicy = await ui.read(ACCESS_POLICY_FILE);
+  const savedPolicy = await ui.read(SCOPE_CONFIGURATION_FILE);
   const corruptedPolicy = 'Corrupted policy text must be preserved for Undo.\n';
   const corruptedSettings = '{ malformed editor configuration';
-  await fs.writeFile(path.join(ui.root, ACCESS_POLICY_FILE), corruptedPolicy);
+  await fs.writeFile(path.join(ui.root, SCOPE_CONFIGURATION_FILE), corruptedPolicy);
   await fs.writeFile(path.join(ui.root, '.vscode/settings.json'), corruptedSettings);
   await ui.command('refresh');
   assert.ok(ui.state().configurationError);
   await ui.command('recover');
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), savedPolicy);
+  assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), savedPolicy);
   assert.match(ui.state().configurationError!, /invalid JSON\/JSONC/);
   const errorCount = ui.errors.length;
 
   await ui.command('restore');
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), corruptedPolicy, 'Restore must use the selected root while loading remains blocked');
+  assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), corruptedPolicy, 'Restore must use the selected root while loading remains blocked');
   assert.equal(await ui.read('.vscode/settings.json'), corruptedSettings, 'Undo recovery must not repair unrelated settings');
   assert.equal(ui.backups.has(`backup:${ui.root}`), false);
   assert.ok(ui.state().configurationError, 'The faithfully restored corrupt policy remains a configuration error');
@@ -1641,7 +1392,7 @@ test('Restore refuses corrupt, duplicate or unrelated Undo targets without chang
   const ui = await activateInFixture(t);
   await ui.command('apply');
   const agents = await ui.read('AGENTS.md');
-  const access = await ui.read(ACCESS_POLICY_FILE);
+  const access = await ui.read(SCOPE_CONFIGURATION_FILE);
   const readme = await ui.read('README.md');
   const foreign = path.join(path.dirname(ui.root), 'other-workspace-not-selected.md');
   await fs.writeFile(foreign, 'Other workspace contents.\n');
@@ -1659,7 +1410,7 @@ test('Restore refuses corrupt, duplicate or unrelated Undo targets without chang
     await ui.nativeCommand('restore');
     assert.equal(ui.errors.length, errors + 1);
     assert.equal(await ui.read('AGENTS.md'), agents);
-    assert.equal(await ui.read(ACCESS_POLICY_FILE), access);
+    assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), access);
     assert.equal(await ui.read('README.md'), readme);
     assert.equal(await fs.readFile(foreign, 'utf8'), 'Other workspace contents.\n');
   }
@@ -1668,36 +1419,36 @@ test('Restore refuses corrupt, duplicate or unrelated Undo targets without chang
 test('Apply and Restore recheck unsaved editors after their native confirmation dialogs', async (t) => {
   const ui = await activateInFixture(t);
   await ui.command('apply');
-  const policy = await ui.read(ACCESS_POLICY_FILE);
-  const filename = path.join(ui.root, ACCESS_POLICY_FILE);
+  const policy = await ui.read(SCOPE_CONFIGURATION_FILE);
+  const filename = path.join(ui.root, SCOPE_CONFIGURATION_FILE);
   const editor = { isDirty: false, uri: MockUri.file(filename), fileName: filename };
   ui.textDocuments.push(editor);
   await ui.toggle(await findPathRow(ui, 'references/nested/paper.md'), 'write', true);
   ui.beforeApplyConfirmation.push(async () => { editor.isDirty = true; });
   await ui.command('apply');
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), policy);
+  assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), policy);
   assert.match(ui.errors.at(-1)!, /unsaved|save or discard/i);
   editor.isDirty = false;
   await ui.command('apply');
-  const applied = await ui.read(ACCESS_POLICY_FILE);
+  const applied = await ui.read(SCOPE_CONFIGURATION_FILE);
   ui.beforeRestoreConfirmation.push(async () => { editor.isDirty = true; });
   const errors = ui.errors.length;
   await ui.nativeCommand('restore');
   assert.equal(ui.errors.length, errors + 1);
   assert.match(ui.errors.at(-1)!, /unsaved|save or discard/i);
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), applied);
+  assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), applied);
   assert.ok(ui.backups.has(`backup:${ui.root}`));
 });
 
 test('Preview shows the current and proposed access policy for a selected leaf without saving any files', async (t) => {
   const ui = await activateInFixture(t);
   await ui.command('apply');
-  const before = await ui.read(ACCESS_POLICY_FILE);
+  const before = await ui.read(SCOPE_CONFIGURATION_FILE);
   const main = await ui.read('AGENTS.md');
   const backup = structuredClone(ui.backups.get(`backup:${ui.root}`));
   const leaf = 'references/nested/paper.md';
   await ui.toggle(await findPathRow(ui, leaf), 'write', true);
-  ui.quickAnswers.push((items: Array<{ label: string }>) => items.find(item => path.normalize(item.label) === path.normalize(ACCESS_POLICY_FILE)));
+  ui.quickAnswers.push((items: Array<{ label: string }>) => items.find(item => path.normalize(item.label) === path.normalize(SCOPE_CONFIGURATION_FILE)));
   await ui.command('preview');
 
   assert.deepEqual(ui.errors, []);
@@ -1708,13 +1459,13 @@ test('Preview shows the current and proposed access policy for a selected leaf w
   const [beforeUri, afterUri, title] = diff.args as [MockUri, MockUri, string];
   assert.equal(content.provideTextDocumentContent(beforeUri), before);
   const proposed = content.provideTextDocumentContent(afterUri);
-  const proposedRegistry = readAccessRegistry(main, proposed)!;
+  const proposedRegistry = readScopeConfiguration(proposed);
   assert.deepEqual(proposedRegistry.submodules.project.write_paths, [leaf]);
   assert.match(title, /AgentScope:/);
   const prompt = ui.quickPickPrompts.at(-1)!;
   assert.match(prompt.options.title, /Preview pending/);
   assert.match(prompt.options.placeHolder, /current.*left.*proposed.*right/i);
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), before, 'Preview is read-only');
+  assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), before, 'Preview is read-only');
   assert.equal(await ui.read('AGENTS.md'), main);
   assert.deepEqual(ui.backups.get(`backup:${ui.root}`), backup);
   assert.equal(ui.state().dirty, true);
@@ -1754,7 +1505,7 @@ test('Canceling Preview preserves the draft and opening each pending output show
     assert.equal(content.provideTextDocumentContent(afterUri), file.change.after);
   }
   for (const [name, original] of originals) assert.equal(await ui.read(name), original);
-  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
   assert.equal(ui.state().dirty, true);
   assert.equal(ui.backups.size, 0);
   assert.deepEqual(ui.errors, []);
@@ -1764,13 +1515,13 @@ test('A native Preview keeps its selected workspace locked while choosing a pend
   const ui = await activateInFixture(t);
   await ui.command('apply');
   await ui.toggle(await findPathRow(ui, 'references/nested/paper.md'), 'write', true);
-  const original = await ui.read(ACCESS_POLICY_FILE);
+  const original = await ui.read(SCOPE_CONFIGURATION_FILE);
   let enter!: () => void;
   let release!: () => void;
   const entered = new Promise<void>(resolve => { enter = resolve; });
   const held = new Promise<void>(resolve => { release = resolve; });
   ui.quickAnswers.push(async (items: Array<{ label: string }>) => {
-    enter(); await held; return items.find(item => path.normalize(item.label) === path.normalize(ACCESS_POLICY_FILE));
+    enter(); await held; return items.find(item => path.normalize(item.label) === path.normalize(SCOPE_CONFIGURATION_FILE));
   });
   const previewing = ui.nativeCommand('preview');
   await entered;
@@ -1779,7 +1530,7 @@ test('A native Preview keeps its selected workspace locked while choosing a pend
     for (const action of ['selectWorkspace', 'apply', 'restore']) await ui.nativeCommand(action);
     assert.equal(ui.errors.length, 3);
     assert.ok(ui.errors.every(error => /Wait for the current|Wait for.*selection/i.test(error)));
-    assert.equal(await ui.read(ACCESS_POLICY_FILE), original);
+    assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), original);
   } finally { release(); await previewing; }
   assert.equal(ui.state().busy, false);
   assert.equal(ui.executeCalls.filter(call => call.name === 'vscode.diff').length, 1);
@@ -1789,7 +1540,7 @@ test('A native Preview keeps its selected workspace locked while choosing a pend
 test('Closing a Preview document releases its stored snapshot without changing other open previews', async (t) => {
   const ui = await activateInFixture(t);
   await ui.toggle(await findPathRow(ui, 'references/nested/paper.md'), 'write', true);
-  ui.quickAnswers.push((items: Array<{ label: string }>) => items.find(item => path.normalize(item.label) === path.normalize(ACCESS_POLICY_FILE)));
+  ui.quickAnswers.push((items: Array<{ label: string }>) => items.find(item => path.normalize(item.label) === path.normalize(SCOPE_CONFIGURATION_FILE)));
   await ui.command('preview');
   const content = ui.previewProviders.get('agentscope-preview');
   assert.ok(content);
@@ -1808,23 +1559,23 @@ test('Closing a Preview document releases its stored snapshot without changing o
 test('Windows URI casing cannot bypass unsaved-editor guards for Apply, Recover or Restore', { skip: process.platform !== 'win32' }, async (t) => {
   const ui = await activateInFixture(t);
   await ui.command('apply');
-  const saved = await ui.read(ACCESS_POLICY_FILE);
-  const filename = path.join(ui.root, ACCESS_POLICY_FILE);
+  const saved = await ui.read(SCOPE_CONFIGURATION_FILE);
+  const filename = path.join(ui.root, SCOPE_CONFIGURATION_FILE);
   const editor = { isDirty: true, uri: MockUri.file(filename.toLowerCase()), fileName: filename };
   assert.notEqual(editor.uri.fsPath, filename, 'The fixture exercises Windows canonical URI casing');
   ui.textDocuments.push(editor);
   await ui.toggle(await findPathRow(ui, 'references/nested/paper.md'), 'write', true);
   await ui.command('apply');
   assert.match(ui.errors.at(-1)!, /save or discard/i);
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), saved);
+  assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), saved);
 
   editor.isDirty = false;
   await ui.command('apply');
-  const applied = await ui.read(ACCESS_POLICY_FILE);
+  const applied = await ui.read(SCOPE_CONFIGURATION_FILE);
   editor.isDirty = true;
   await ui.nativeCommand('restore');
   assert.match(ui.errors.at(-1)!, /save or discard/i);
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), applied);
+  assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), applied);
 
   editor.isDirty = false;
   const corrupted = 'Policy bytes that must survive an unsaved-editor conflict.\n';
@@ -1834,7 +1585,7 @@ test('Windows URI casing cannot bypass unsaved-editor guards for Apply, Recover 
   editor.isDirty = true;
   await ui.command('recover');
   assert.match(ui.errors.at(-1)!, /save or discard/i);
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), corrupted);
+  assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), corrupted);
 });
 
 test('Workspace files parent selects all safe resource roots without granting project access or storing the workspace root', async (t) => {
@@ -1849,7 +1600,7 @@ test('Workspace files parent selects all safe resource roots without granting pr
   const read = ui.state().resources!.scope!.read_paths;
   assert.ok(read.includes('Instructions'));
   assert.ok(read.includes('README.md'));
-  assert.ok(read.includes('.agentscope'));
+  assert.ok(read.includes('.vscode'));
   assert.ok(!read.includes('.') && !read.some(relative => relative === 'project' || relative.startsWith('project/')));
   assert.deepEqual(ui.scope(), beforeProject);
   await ui.toggle(ui.state().resources!, 'write', true);
@@ -1858,7 +1609,7 @@ test('Workspace files parent selects all safe resource roots without granting pr
   assert.ok(!ui.state().resources!.scope!.write_paths.includes('.'));
   await ui.command('apply');
   assert.deepEqual(ui.errors, []);
-  const persisted = readAccessRegistry(await ui.read('AGENTS.md'), await ui.read(ACCESS_POLICY_FILE))!;
+  const persisted = readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE), ui.root);
   assert.equal(persisted.submodules.project.enabled, false);
   assert.ok(!persisted.shared_resources.read_paths.includes('.') && !persisted.shared_resources.write_paths.includes('.'));
   assert.deepEqual(ui.scope(), beforeProject);
@@ -1916,7 +1667,7 @@ test('A native project configuration dialog keeps its draft stable and defers ex
     assert.equal(ui.errors.length, 3);
     assert.ok(ui.errors.every(error => /Wait for the current|Wait for.*selection/i.test(error)));
     await fs.writeFile(path.join(ui.root, 'AGENTS.md'), external);
-    ui.fireFileEvent('AGENTS.md');
+    ui.fireFileEvent(SCOPE_CONFIGURATION_FILE);
     assert.equal(ui.state().workspaceId, epoch, 'The watcher must defer replacing a draft while the dialog is open');
   } finally { release(); await configuring; }
   assert.equal(ui.state().busy, false);
@@ -1929,7 +1680,7 @@ test('A native project configuration dialog keeps its draft stable and defers ex
   await ui.command('apply');
   assert.match(ui.errors.at(-1)!, /changed.*refresh/i);
   assert.equal(await ui.read('AGENTS.md'), external);
-  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
 });
 
 test('An unchanged Recovery preserves the previous Undo journal, explains the no-op and still checks for competing edits', async (t) => {
@@ -1938,18 +1689,18 @@ test('An unchanged Recovery preserves the previous Undo journal, explains the no
   const previousUndo = structuredClone(ui.backups.get(`backup:${ui.root}`));
   assert.ok(Array.isArray(previousUndo) && previousUndo.length > 0);
   const agents = await ui.read('AGENTS.md');
-  const policy = await ui.read(ACCESS_POLICY_FILE);
+  const policy = await ui.read(SCOPE_CONFIGURATION_FILE);
   await ui.command('recover');
   assert.deepEqual(ui.errors, []);
   assert.deepEqual(ui.backups.get(`backup:${ui.root}`), previousUndo);
   assert.equal(await ui.read('AGENTS.md'), agents);
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), policy);
+  assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), policy);
   const message = ui.informationMessages.at(-1)!;
-  assert.match(message, /saved policy.*already on disk/i);
+  assert.match(message, /saved.*configuration.*already on disk/i);
   assert.match(message, /no files changed/i);
   assert.doesNotMatch(message, /Restore.*undo.*recovery/i);
 
-  const target = path.join(ui.root, ACCESS_POLICY_FILE);
+  const target = path.join(ui.root, SCOPE_CONFIGURATION_FILE);
   const competing = `${policy}\nPreserve this concurrent access policy note.\n`;
   const readFile = fs.readFile.bind(fs);
   let changed = false;
@@ -2007,18 +1758,24 @@ test('File changes during preset input are reconciled after both saving and canc
     await t.test(cancelled ? 'cancelled input' : 'saved preset', async (t) => {
       const ui = await activateInFixture(t);
       const epoch = ui.state().workspaceId;
-      const damaged = '```json\n{"submodules":\n```\n';
+      const damaged = '{ invalid configuration';
       if (!cancelled) ui.inputAnswers.push('Writing');
       ui.beforePresetInput.push(async () => {
         assert.equal(ui.state().busy, true);
-        await fs.writeFile(path.join(ui.root, 'AGENTS.md'), damaged);
-        ui.fireFileEvent('AGENTS.md');
+        await fs.writeFile(path.join(ui.root, SCOPE_CONFIGURATION_FILE), damaged);
+        ui.fireFileEvent(SCOPE_CONFIGURATION_FILE);
         assert.equal(ui.state().workspaceId, epoch);
       });
       await ui.nativeCommand('savePreset');
+      if (!cancelled) {
+        await ui.waitForState(model => model.dirty && !model.busy, 'Saved preset remains a pending export');
+        assert.match(ui.state().message, /configuration changed outside AgentScope/i);
+        ui.warningAnswers.push('Discard draft');
+        await ui.command('refresh');
+      }
       await ui.waitForState(model => !!model.configurationError && !model.busy, 'Queued invalid policy reload');
       assert.equal(ui.state().projects.length, 0);
-      assert.equal(await ui.read('AGENTS.md'), damaged);
+      assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), damaged);
       assert.ok(ui.state().workspaceId > epoch);
     });
   }
@@ -2029,15 +1786,15 @@ test('A policy event after the post-Apply snapshot is reloaded before the panel 
   const gate = ui.pauseNextLoadedSnapshot();
   const applying = ui.nativeCommand('apply');
   await gate.started;
-  const damaged = 'Damaged sidecar after the loaded snapshot.\n';
+  const damaged = '{ invalid configuration';
   try {
-    await fs.writeFile(path.join(ui.root, ACCESS_POLICY_FILE), damaged);
-    ui.fireFileEvent(ACCESS_POLICY_FILE);
+    await fs.writeFile(path.join(ui.root, SCOPE_CONFIGURATION_FILE), damaged);
+    ui.fireFileEvent(SCOPE_CONFIGURATION_FILE);
   } finally { gate.release(); }
   await applying;
   await ui.waitForState(model => !!model.configurationError && !model.busy, 'Late post-Apply policy error');
   assert.equal(ui.state().projects.length, 0);
-  assert.equal(await ui.read(ACCESS_POLICY_FILE), damaged);
+  assert.equal(await ui.read(SCOPE_CONFIGURATION_FILE), damaged);
 });
 
 test('A queued own Apply event preserves the applied preset when its choices still match', async (t) => {
@@ -2048,7 +1805,7 @@ test('A queued own Apply event preserves the applied preset when its choices sti
   const applying = ui.nativeCommand('apply');
   await gate.started;
   const epoch = ui.state().workspaceId;
-  try { ui.fireFileEvent(ACCESS_POLICY_FILE); } finally { gate.release(); }
+  try { ui.fireFileEvent(SCOPE_CONFIGURATION_FILE); } finally { gate.release(); }
   await applying;
   await ui.waitForState(model => model.workspaceId >= epoch + 2 && !model.busy, 'Own-write revalidation');
   assert.equal(ui.state().preset, 'Writing');
@@ -2076,7 +1833,7 @@ test('Removing a selected workspace during Apply confirmation aborts before poli
   assert.equal(ui.state().workspace, null);
   assert.match(ui.errors.at(-1)!, /no longer open/i);
   assert.equal(await ui.read('AGENTS.md'), ui.originals.get('AGENTS.md'));
-  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
   assert.equal(ui.backups.size, 0);
 });
 
@@ -2104,7 +1861,7 @@ test('Removing the workspace during awaited Apply backup storage aborts before p
   assert.equal(ui.state().workspace, null);
   assert.match(ui.errors.at(-1)!, /no longer open/i);
   assert.equal(await ui.read('AGENTS.md'), ui.originals.get('AGENTS.md'));
-  await assert.rejects(fs.stat(path.join(ui.root, ACCESS_POLICY_FILE)), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
   assert.equal(ui.backups.get(`backup:${ui.root}`), undefined);
   assert.equal(ui.durable.get(`${checkpointKey(ui.root)}.pending`), undefined);
 });
@@ -2167,7 +1924,7 @@ test('Adding multiple child folders replaces an empty disabled root without tran
   assert.equal(ui.state().dirty, true);
   assert.equal(await ui.read('AGENTS.md'), original, 'Adding folders must remain a draft until Apply');
   await ui.nativeCommand('apply');
-  const saved = readAccessRegistry(await ui.read('AGENTS.md'), await ui.read(ACCESS_POLICY_FILE));
+  const saved = readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE), ui.root);
   assert.deepEqual(Object.values(saved!.submodules).map(module => module.path).sort(), ['Instructions', 'project']);
   assert.deepEqual(ui.errors, []);
 });
@@ -2229,4 +1986,196 @@ test('Visibility and enable toggles reuse the displayed resource frontier', asyn
   assert.equal(ui.projectRow().hidden, true);
   assert.equal(ui.scope().enabled, true);
   assert.deepEqual(ui.errors, []);
+});
+
+test('AgentScope new-chat prompt is optional and disabled by default', async (t) => {
+  const ui = await activateInFixture(t);
+  await ui.nativeCommand('newChat');
+  assert.deepEqual(ui.errors, []);
+  assert.equal(ui.executeCalls.filter(call => call.name === 'chatgpt.newChat').length, 1);
+  assert.equal(ui.quickPickPrompts.length, 0);
+  for (const [file, original] of ui.originals) assert.equal(await ui.read(file), original);
+  await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
+});
+
+test('The preset-prompt menu toggle updates the selected workspace setting', async (t) => {
+  const ui = await activateInFixture(t);
+  assert.equal(ui.state().promptPresetForNewChat, false);
+  await ui.nativeCommand('toggleNewChatPresetPrompt');
+  assert.equal(ui.configuration.promptPresetForNewChat, true);
+  assert.equal(ui.state().promptPresetForNewChat, true);
+  await ui.nativeCommand('toggleNewChatPresetPrompt');
+  assert.equal(ui.configuration.promptPresetForNewChat, false);
+  assert.equal(ui.state().promptPresetForNewChat, false);
+  assert.deepEqual(ui.errors, []);
+});
+
+test('Cancelling a new-chat preset picker does not publish or open Codex', async (t) => {
+  const ui = await activateInFixture(t);
+  ui.inputAnswers.push('Writing');
+  await ui.nativeCommand('savePreset');
+  ui.configuration.promptPresetForNewChat = true;
+  await ui.nativeCommand('newChat');
+  assert.deepEqual(ui.errors, []);
+  assert.match(ui.quickPickPrompts.at(-1)!.options.title, /Preset for new Codex chat/);
+  assert.equal(ui.executeCalls.filter(call => call.name === 'chatgpt.newChat').length, 0);
+  assert.equal(ui.confirmations.length, 0);
+  await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
+  assert.equal(await ui.read('.codex/config.toml'), ui.originals.get('.codex/config.toml'));
+});
+
+test('Choosing a chat preset publishes its profile then requires manual native selection', async (t) => {
+  const ui = await activateInFixture(t);
+  ui.inputAnswers.push('Writing');
+  await ui.nativeCommand('savePreset');
+  ui.configuration.promptPresetForNewChat = true;
+  ui.quickAnswers.push((items: Array<{label: string}>) => items.find(item => item.label === 'Writing'));
+  await ui.nativeCommand('newChat');
+  assert.deepEqual(ui.errors, []);
+  assert.equal(ui.confirmations.length, 1);
+  const opened = ui.executeCalls.filter(call => call.name === 'chatgpt.newChat');
+  assert.equal(opened.length, 1);
+  assert.deepEqual(opened[0].args, [], 'Never pretend to bind a profile using unsupported command arguments');
+  const guidance = ui.informationMessages.at(-1)!;
+  assert.ok(guidance.includes(path.basename(ui.root)), 'Identify the workspace the user must select in Codex');
+  assert.match(guidance, /Use workspace.*before sending.*select.*Writing.*Permissions/i);
+  assert.match(guidance, /cannot select the workspace or profile automatically/i);
+  const codex = TOML.parse(await ui.read('.codex/config.toml')) as Record<string, any>;
+  assert.ok(Object.values(codex.permissions).some((profile: any) => /Writing/.test(profile.description)));
+});
+
+test('Cancelling profile publication prevents opening the scoped chat', async (t) => {
+  const ui = await activateInFixture(t);
+  ui.inputAnswers.push('Writing');
+  await ui.nativeCommand('savePreset');
+  ui.configuration.promptPresetForNewChat = true;
+  ui.quickAnswers.push((items: Array<{label: string}>) => items.find(item => item.label === 'Writing'));
+  ui.applyAnswers.push(undefined);
+  await ui.nativeCommand('newChat');
+  assert.equal(ui.executeCalls.filter(call => call.name === 'chatgpt.newChat').length, 0);
+  assert.match(ui.errors.at(-1)!, /Apply.*permission profiles/i);
+});
+
+test('Removed instruction and access-policy commands cannot be invoked from the panel', async (t) => {
+  const ui = await activateInFixture(t);
+  for (const command of ['openAgents', 'openAccess']) {
+    await ui.command(command);
+  }
+  assert.equal(ui.openedDocuments.length, 0);
+  assert.equal(ui.errors.length, 2);
+});
+
+test('A held chat preset picker blocks refresh, scope mutations and a second chat operation', async (t) => {
+  const ui = await activateInFixture(t);
+  ui.inputAnswers.push('Writing');
+  await ui.nativeCommand('savePreset');
+  ui.configuration.promptPresetForNewChat = true;
+  const before = structuredClone(ui.scope());
+  let enter!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  ui.quickAnswers.push(async () => { enter(); await held; return undefined; });
+  const opening = ui.nativeCommand('newChat');
+  await entered;
+  try {
+    assert.equal(ui.state().busy, true);
+    for (const action of ['refresh', 'toggleAccess', 'newChat', 'toggleNewChatPresetPrompt']) {
+      await ui.nativeCommand(action);
+    }
+    assert.equal(ui.errors.length, 4);
+    assert.ok(ui.errors.every(error => /Wait for.*(?:operation|chat)/i.test(error)));
+    assert.deepEqual(ui.scope(), before);
+    assert.equal(ui.configuration.promptPresetForNewChat, true);
+    assert.equal(ui.quickPickPrompts.length, 1, 'A second command must not open another picker');
+    assert.equal(ui.executeCalls.filter(call => call.name === 'chatgpt.newChat').length, 0);
+    assert.equal(await ui.read('.codex/config.toml'), ui.originals.get('.codex/config.toml'));
+  } finally { release(); await opening; }
+  assert.equal(ui.state().busy, false);
+  assert.equal(ui.confirmations.length, 0);
+});
+
+test('Removing the workspace during scoped-chat publication prevents opening Codex', async (t) => {
+  const ui = await activateInFixture(t, true, false, {}, undefined, { multiRoot: true });
+  ui.inputAnswers.push('Writing');
+  await ui.nativeCommand('savePreset');
+  ui.configuration.promptPresetForNewChat = true;
+  ui.quickAnswers.push((items: Array<{ label: string }>) => items.find(item => item.label === 'Writing'));
+  ui.beforeApplyConfirmation.push(async () => { ui.removeSelectedWorkspace(); });
+  await ui.nativeCommand('newChat');
+  assert.equal(ui.errors.length, 1);
+  assert.match(ui.errors[0], /workspace.*no longer open/i);
+  assert.equal(ui.executeCalls.filter(call => call.name === 'chatgpt.newChat').length, 0);
+  assert.equal(await ui.read('.codex/config.toml'), ui.originals.get('.codex/config.toml'));
+  await assert.rejects(fs.stat(path.join(ui.root, SCOPE_CONFIGURATION_FILE)), { code: 'ENOENT' });
+  assert.equal(ui.state().workspace, null);
+  assert.equal(ui.state().busy, false);
+});
+
+test('A preset edited while choosing a chat is rejected before publishing or opening', async (t) => {
+  const ui = await activateInFixture(t);
+  ui.inputAnswers.push('Writing');
+  await ui.nativeCommand('savePreset');
+  ui.configuration.promptPresetForNewChat = true;
+  ui.quickAnswers.push(async (items: Array<{ label: string }>) => {
+    const store = parseJsoncStrict(await ui.read('.vscode/agentscope-presets.json'), 'Presets') as Record<string, any>;
+    store.presets.Writing.options.allowNetwork = true;
+    await fs.writeFile(path.join(ui.root, '.vscode/agentscope-presets.json'), JSON.stringify(store));
+    ui.fireFileEvent('.vscode/agentscope-presets.json');
+    return items.find(item => item.label === 'Writing');
+  });
+  await ui.nativeCommand('newChat');
+  assert.equal(ui.errors.length, 1);
+  assert.match(ui.errors[0], /(?:chosen preset changed.*Choose it again|Saved presets changed.*refresh)/i);
+  assert.equal(ui.confirmations.length, 0);
+  assert.equal(ui.executeCalls.filter(call => call.name === 'chatgpt.newChat').length, 0);
+  assert.equal(await ui.read('.codex/config.toml'), ui.originals.get('.codex/config.toml'));
+  assert.equal(ui.state().busy, false);
+});
+
+test('The chat picker offers presets for the current Windows or WSL runtime family', async (t) => {
+  const ui = await activateInFixture(t);
+  ui.configuration.codexFilesystemMode = 'strict';
+  ui.configuration.codexRuntime = 'native';
+  ui.configuration.codexWorkspaceRoot = 'E:\\Remote\\Workspace';
+  ui.inputAnswers.push('Windows project');
+  await ui.nativeCommand('savePreset');
+  ui.configuration.codexRuntime = 'wsl';
+  ui.configuration.codexWorkspaceRoot = '/mnt/z/Workspace';
+  ui.inputAnswers.push('WSL project');
+  await ui.nativeCommand('savePreset');
+  ui.configuration.promptPresetForNewChat = true;
+
+  ui.configuration.codexRuntime = 'native';
+  ui.configuration.codexWorkspaceRoot = 'E:\\Remote\\Workspace';
+  await ui.nativeCommand('newChat');
+  assert.deepEqual((ui.quickPickPrompts.at(-1)!.items as Array<{ label: string }>).map(item => item.label), ['Windows project']);
+
+  ui.configuration.codexRuntime = 'wsl';
+  ui.configuration.codexWorkspaceRoot = '/mnt/z/Workspace';
+  await ui.nativeCommand('newChat');
+  assert.deepEqual((ui.quickPickPrompts.at(-1)!.items as Array<{ label: string }>).map(item => item.label), ['WSL project']);
+  assert.deepEqual(ui.errors, []);
+  assert.equal(ui.executeCalls.filter(call => call.name === 'chatgpt.newChat').length, 0);
+  assert.equal(ui.confirmations.length, 0);
+});
+
+test('Activating an older preset ignores its removed instruction-file dependency', async (t) => {
+  const ui = await activateInFixture(t, true, false, { enabled: true });
+  ui.configuration.codexFilesystemMode = 'strict';
+  ui.inputAnswers.push('Legacy workflow');
+  await ui.nativeCommand('savePreset');
+  const store = parseJsoncStrict(await ui.read('.vscode/agentscope-presets.json'), 'Presets') as Record<string, any>;
+  const oldInstruction = 'project/references/missing-workflow.md';
+  store.presets['Legacy workflow'].registry.submodules.project.instruction_file = oldInstruction;
+  const legacyPreset = JSON.stringify(store);
+  await fs.writeFile(path.join(ui.root, '.vscode/agentscope-presets.json'), legacyPreset);
+  ui.quickAnswers.push('Legacy workflow');
+  ui.warningAnswers.push('Load preset');
+  await ui.nativeCommand('activatePreset');
+  assert.deepEqual(ui.errors, []);
+  assert.equal(ui.scope().instruction_file, null);
+  assert.equal(readScopeConfiguration(await ui.read(SCOPE_CONFIGURATION_FILE)).submodules.project.instruction_file, null);
+  assert.equal(await ui.read('.vscode/agentscope-presets.json'), legacyPreset, 'Keep the saved snapshot while dropping its obsolete active dependency');
+  await assert.rejects(fs.stat(path.join(ui.root, oldInstruction)), { code: 'ENOENT' });
 });

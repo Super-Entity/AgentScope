@@ -3,8 +3,13 @@ import * as path from 'node:path';
 import { updateExcludesSettings } from './core/excludes';
 import { assertDirectoryIdentity, captureDirectoryIdentity, ContainedResolver, createContainedResolver, normalizeRelative, resolveContained, verifyContained } from './core/paths';
 import { generateProfile, updateCodexConfig } from './core/profile';
-import { CodexFilesystemMode, CodexRuntime, runtimeWorkspaceRoot } from './core/runtimePaths';
-import { ACCESS_POLICY_FILE, emptyRegistry, parseGitmodules, parseJsoncStrict, readAccessRegistry, readAgentsRegistry, validateRegistry, writeAccessFiles, writeReconfiguredAccessFiles } from './core/registry';
+import { CodexFilesystemMode, CodexRuntime, resolveFilesystemMode, runtimeWorkspaceRoot } from './core/runtimePaths';
+import { ACCESS_POLICY_FILE, detachLegacyInstructions, emptyRegistry, legacyRegistryJsonc, parseGitmodules, parseJsoncStrict, readAccessRegistry, readAgentsRegistry, validateRegistry } from './core/registry';
+import { SCOPE_CONFIGURATION_FILE, readScopeConfiguration, writeScopeConfiguration } from './configuration';
+import { readPresets } from './presets';
+import { exportPresetProfiles } from './core/presetProfiles';
+import { detectWindowsSandbox, WindowsSandboxDetection } from './windowsSandbox';
+import { updateWindowsSandbox } from './core/windowsConfig';
 import { ApplyPlan, DiscoveredModule, FileChange, ModuleConfig, Registry, WorkspaceState } from './types';
 import { isResourcePath } from './resources';
 
@@ -16,6 +21,9 @@ export interface ApplyOptions {
   codexRuntime?: CodexRuntime;
   codexWorkspaceRoot?: string;
   codexFilesystemMode?: CodexFilesystemMode;
+  /** Resolved host preference used when a saved preset uses auto. */
+  codexAutoRuntime?: CodexRuntime;
+  codexWindowsSandbox?: 'auto' | 'mxc' | 'legacy';
 }
 
 const agentsFile = 'AGENTS.md';
@@ -66,14 +74,15 @@ async function readConfiguration(root: string, relative: string, resolver: Conta
 
 async function readWorkspaceConfiguration(root: string): Promise<Array<{ path: string; text: string | null }>> {
   const resolver = await createContainedResolver(root);
+  const configuration = await readConfiguration(root, SCOPE_CONFIGURATION_FILE, resolver);
   const files = await Promise.all([
-    readConfiguration(root, agentsFile, resolver),
-    readConfiguration(root, ACCESS_POLICY_FILE, resolver),
+    configuration.text === null ? readConfiguration(root, agentsFile, resolver) : { path: resolveContained(root, agentsFile), text: null },
+    configuration.text === null ? readConfiguration(root, ACCESS_POLICY_FILE, resolver) : { path: resolveContained(root, ACCESS_POLICY_FILE), text: null },
     readConfiguration(root, gitmodulesFile, resolver),
     readConfiguration(root, settingsFile, resolver),
   ]);
   await resolver.assertUnchanged();
-  return files;
+  return [...files, configuration];
 }
 
 function settingsExclusions(settings: string | null): Record<string, unknown> | undefined {
@@ -154,13 +163,15 @@ async function discoverOrdinaryProjects(root: string, warnings: string[]): Promi
 export async function loadWorkspace(root: string): Promise<WorkspaceState> {
   const canonicalRoot = await fs.realpath(path.resolve(root));
   const rootIdentity = await captureDirectoryIdentity(canonicalRoot);
-  const [agents, access, gitmodules, settings] = await readWorkspaceConfiguration(canonicalRoot);
-  const existingRegistry = readAccessRegistry(agents.text ?? '', access.text);
+  const [agents, access, gitmodules, settings, configuration] = await readWorkspaceConfiguration(canonicalRoot);
+  const existingRegistry = configuration.text === null ? readAccessRegistry(agents.text ?? '', access.text) : readScopeConfiguration(configuration.text, canonicalRoot);
   const registry = existingRegistry ?? emptyRegistry();
+  // Specialized workflows are no longer selected or enforced by AgentScope.
+  for (const module of Object.values(registry.submodules)) module.instruction_file = null;
   const discovered = parseGitmodules(gitmodules.text ?? '');
   const warnings: string[] = [];
-  if (agents.text === null && access.text !== null) {
-    warnings.push('AGENTS.md is missing. Apply will recreate its access reference; saved access settings are preserved.');
+  if (configuration.text === null && existingRegistry !== null) {
+    warnings.push('Legacy AgentScope selections were imported. Apply stores editor state in .vscode/agentscope.json and removes only recognized generated instructions from AGENTS.md. The old sidecar is retained as a backup and is no longer used.');
   }
   if (existingRegistry === null && discovered.length === 0) {
     for (const module of await discoverOrdinaryProjects(canonicalRoot, warnings)) {
@@ -199,7 +210,7 @@ export async function loadWorkspace(root: string): Promise<WorkspaceState> {
   await assertDirectoryIdentity(canonicalRoot, rootIdentity);
   return {
     root: canonicalRoot, rootIdentity, registry, hidden, resourceHidden: resourceVisibility(excludes, registry), dirty: false, warnings,
-    files: { [agents.path]: agents.text, [access.path]: access.text, [gitmodules.path]: gitmodules.text, [settings.path]: settings.text },
+    files: { ...(configuration.text === null ? { [agents.path]: agents.text, [access.path]: access.text } : {}), [configuration.path]: configuration.text, [gitmodules.path]: gitmodules.text, [settings.path]: settings.text },
   };
 }
 
@@ -210,7 +221,7 @@ export async function loadWorkspace(root: string): Promise<WorkspaceState> {
 export async function loadWorkspaceForReconfiguration(root: string, registrationRegistry?: Registry): Promise<WorkspaceState> {
   const canonicalRoot = await fs.realpath(path.resolve(root));
   const rootIdentity = await captureDirectoryIdentity(canonicalRoot);
-  const [agents, access, gitmodules, settings] = await readWorkspaceConfiguration(canonicalRoot);
+  const [agents, access, gitmodules, settings, configuration] = await readWorkspaceConfiguration(canonicalRoot);
   const registry = emptyRegistry();
   const warnings = ['Access reconfiguration is a draft. All previous Read and Write choices have been cleared; select the intended scopes and Apply to rebuild the policy.'];
   const registrations: Array<{ label: string; modules: DiscoveredModule[] }> = [];
@@ -219,6 +230,7 @@ export async function loadWorkspaceForReconfiguration(root: string, registration
     registrations.push({ label: 'saved workspace registration', modules: Object.entries(registrationRegistry.submodules).map(([name, module]) => ({ name, path: module.path })) });
   }
   for (const [label, read] of [
+    [SCOPE_CONFIGURATION_FILE, () => configuration.text === null ? null : readScopeConfiguration(configuration.text, canonicalRoot)],
     ['AGENTS.md', () => readAgentsRegistry(agents.text ?? '')],
     [ACCESS_POLICY_FILE, () => access.text === null ? null : readAccessRegistry('', access.text)],
   ] as const) {
@@ -269,7 +281,7 @@ export async function loadWorkspaceForReconfiguration(root: string, registration
   return {
     root: canonicalRoot, rootIdentity, registry, hidden, resourceHidden: resourceVisibility(excludes, registry),
     dirty: true, reconfigurePolicy: true, warnings,
-    files: { [agents.path]: agents.text, [access.path]: access.text, [gitmodules.path]: gitmodules.text, [settings.path]: settings.text },
+    files: { ...(configuration.text === null ? { [agents.path]: agents.text, [access.path]: access.text } : {}), [configuration.path]: configuration.text, [gitmodules.path]: gitmodules.text, [settings.path]: settings.text },
   };
 }
 
@@ -453,25 +465,67 @@ async function expectedConfiguration(state: WorkspaceState, relative: string, re
 }
 
 /** Compute all output text first. Any invalid registry/profile aborts without writing files. */
-export async function buildApplyPlan(state: WorkspaceState, options: ApplyOptions): Promise<ApplyPlan> {
+export async function buildApplyPlan(state: WorkspaceState, options: ApplyOptions,
+  dependencies: { detectWindowsSandbox?: typeof detectWindowsSandbox; presetDefaults?: ApplyOptions } = {}): Promise<ApplyPlan> {
   const rootIdentity = state.rootIdentity ??= await captureDirectoryIdentity(state.root);
   await assertDirectoryIdentity(state.root, rootIdentity);
   if (comparable(await fs.realpath(state.root)) !== comparable(state.root)) throw new Error('Workspace root changed since it was loaded; refresh before applying.');
   validateRegistry(state.registry, state.root);
   const scopes = await verifyScopes(state.root, state.registry);
   const warnings = [...state.warnings];
+  let windowsBackend: 'mxc' | 'elevated' | undefined;
+  let detection: Promise<WindowsSandboxDetection> | undefined;
+  const filesystemOptions = async (input: ApplyOptions): Promise<{ runtimeRoot: string; filesystemMode?: CodexFilesystemMode }> => {
+    const runtimeRoot = runtimeWorkspaceRoot(state.root, input.codexRuntime, input.codexWorkspaceRoot);
+    resolveFilesystemMode(runtimeRoot, input.codexFilesystemMode);
+    if (!/^(?:[A-Za-z]:[\\/]|[\\/]{2})/.test(runtimeRoot)) return { runtimeRoot, filesystemMode: input.codexFilesystemMode };
+    const requested = input.codexWindowsSandbox ?? 'auto';
+    if (!['auto', 'mxc', 'legacy'].includes(requested)) throw new Error('Unknown Windows sandbox selection.');
+    let useMxc = false;
+    if (requested !== 'legacy') {
+      detection ??= (dependencies.detectWindowsSandbox ?? detectWindowsSandbox)({ workspaceRoot: state.root, runtimeRoot });
+      const supported = await detection;
+      useMxc = supported.mxcAvailable;
+      if (!useMxc && requested === 'mxc') throw new Error(`MXC is required but could not be verified. ${supported.reason}`);
+      if (!useMxc) warnings.push(supported.reason);
+    }
+    const backend = useMxc ? 'mxc' : 'elevated';
+    if (windowsBackend && windowsBackend !== backend) throw new Error('Saved presets require different native Windows backends. Choose the same backend for all native presets or export them in separate workspaces.');
+    windowsBackend = backend;
+    warnings.push(useMxc ? 'Native Windows MXC verified. The project pins the MXC backend; strict profiles will fail closed if MXC becomes unavailable.' : 'Native Windows uses the legacy elevated sandbox. Auto allows broad reads while restricting writes; use WSL for read isolation.');
+    return { runtimeRoot, filesystemMode: (input.codexFilesystemMode ?? 'auto') === 'auto' && useMxc ? 'strict' : input.codexFilesystemMode };
+  };
   const changes: FileChange[] = [];
   let broadReadAccess = false;
+  let exportedProfiles: ApplyPlan['exportedProfiles'];
   const checks: NonNullable<ApplyPlan['checks']> = [];
   const pathChecks = [...scopes.pathChecks];
   const configResolver = await createContainedResolver(state.root);
-  const agents = await expectedConfiguration(state, agentsFile, configResolver);
-  const access = await expectedConfiguration(state, ACCESS_POLICY_FILE, configResolver);
+  const configuration = await expectedConfiguration(state, SCOPE_CONFIGURATION_FILE, configResolver);
   const settings = await expectedConfiguration(state, settingsFile, configResolver);
-  const nextPolicy = state.reconfigurePolicy
-    ? writeReconfiguredAccessFiles(agents.before ?? '', state.registry)
-    : writeAccessFiles(agents.before ?? '', access.before, state.registry);
-  warnings.push(...nextPolicy.warnings);
+  let configurationTemplate = state.reconfigurePolicy ? null : configuration.before;
+  if (configuration.before === null) {
+    const agents = await expectedConfiguration(state, agentsFile, configResolver);
+    const access = await expectedConfiguration(state, ACCESS_POLICY_FILE, configResolver);
+    if (!state.reconfigurePolicy) {
+      const legacy = legacyRegistryJsonc(agents.before ?? '', access.before);
+      if (legacy !== null) configurationTemplate = `{\n  "version": 1,\n  "registry": ${legacy.trim()}\n}\n`;
+    }
+    // Migration is part of the same reviewable transaction; never create instruction files.
+    if (agents.before !== null) {
+      let detached = agents.before;
+      try { detached = detachLegacyInstructions(agents.before, access.before); }
+      catch (error) {
+        if (!state.reconfigurePolicy) throw error;
+        warnings.push(`Unrecognized legacy instructions were preserved without modification: ${(error as Error).message} Review any old AgentScope references in AGENTS.md manually; runtime permissions use config.toml.`);
+      }
+      if (detached !== agents.before) changes.push({ ...agents, after: detached });
+      else checks.push({ path: agents.path, expected: agents.before });
+    } else checks.push({ path: agents.path, expected: null });
+    checks.push({ path: access.path, expected: access.before });
+  }
+  const nextConfiguration = writeScopeConfiguration(configurationTemplate, state.registry);
+  if (nextConfiguration !== configuration.before) changes.unshift({ ...configuration, after: nextConfiguration });
   const hiddenByPath: Record<string, boolean> = Object.create(null);
   for (const [name, module] of Object.entries(state.registry.submodules)) {
     if (normalizeRelative(module.path) !== '.') hiddenByPath[module.path] = state.hidden[name] === true;
@@ -495,9 +549,6 @@ export async function buildApplyPlan(state: WorkspaceState, options: ApplyOption
   const nextSettings = visiblePaths.length > 0
     ? updateExcludesSettings(settings.before ?? '', visiblePaths, hiddenByPath, options.excludeFromSearch)
     : settings.before;
-  // Create/update the policy before publishing its reference in AGENTS.md.
-  if (nextPolicy.access !== access.before) changes.push({ ...access, after: nextPolicy.access });
-  if (nextPolicy.agents !== agents.before) changes.push({ ...agents, after: nextPolicy.agents });
   if (nextSettings !== settings.before && nextSettings !== null) changes.push({ ...settings, after: nextSettings });
   const manifest = await expectedConfiguration(state, gitmodulesFile, configResolver);
   checks.push({ path: manifest.path, expected: manifest.before });
@@ -507,19 +558,54 @@ export async function buildApplyPlan(state: WorkspaceState, options: ApplyOption
     checks.push(...git.checks);
     pathChecks.push(...git.pathChecks);
     const profile = generateProfile(state.registry, {
-      root: state.root, runtimeRoot: runtimeWorkspaceRoot(state.root, options.codexRuntime, options.codexWorkspaceRoot),
+      root: state.root, ...await filesystemOptions(options),
       profileName: options.profileName, allowNetwork: options.allowNetwork,
-      filesystemMode: options.codexFilesystemMode,
       gitReadPaths: git.read, gitWritePaths: git.write,
     });
     broadReadAccess = profile.broadReadAccess;
     warnings.push(...profile.warnings);
     const config = await expectedConfiguration(state, codexFile, configResolver);
-    const nextConfig = updateCodexConfig(config.before ?? '', profile.text, options.profileName);
+    let nextConfig = updateCodexConfig(config.before ?? '', profile.text, options.profileName);
+    const presetFile = await expectedConfiguration(state, '.vscode/agentscope-presets.json', configResolver);
+    const store = await readPresets(state.root);
+    // readPresets validates the file independently; retain its exact input for transaction guards.
+    if (await readOptional(presetFile.path) !== presetFile.before) throw new Error('Saved presets changed while planning; refresh and try again.');
+    checks.push({ path: presetFile.path, expected: presetFile.before });
+    const inputs = [];
+    for (const [name, preset] of Object.entries(store.presets)) {
+      const presetOptions = { ...(dependencies.presetDefaults ?? options), ...preset.options };
+      if ((presetOptions.codexRuntime ?? 'auto') === 'auto') presetOptions.codexRuntime = options.codexAutoRuntime ?? options.codexRuntime;
+      if (!presetOptions.generateCodexProfile) continue;
+      const presetRegistry = structuredClone(preset.registry);
+      // A snapshot predating a newly registered project must not inherit access
+      // through an old workspace-resource or parent-folder grant.
+      for (const [name, module] of Object.entries(state.registry.submodules)) {
+        if (!Object.hasOwn(presetRegistry.submodules, name)) {
+          presetRegistry.submodules[name] = disabledProject(module.path);
+        } else if (normalizeRelative(presetRegistry.submodules[name].path) !== normalizeRelative(module.path)) {
+          throw new Error(`Preset project path changed for ${name}. Update the preset before exporting it.`);
+        }
+      }
+      for (const module of Object.values(presetRegistry.submodules)) module.instruction_file = null;
+      validateRegistry(presetRegistry, state.root);
+      const presetScopes = await verifyScopes(state.root, presetRegistry);
+      const presetGit = await verifiedGitPaths(state.root, presetRegistry, discovered, presetScopes.moduleRoots, warnings);
+      checks.push(...presetGit.checks); pathChecks.push(...presetScopes.pathChecks, ...presetGit.pathChecks);
+      inputs.push({ name, registry: presetRegistry, options: {
+        root: state.root, ...await filesystemOptions(presetOptions),
+        allowNetwork: presetOptions.allowNetwork,
+        gitReadPaths: presetGit.read, gitWritePaths: presetGit.write,
+      } });
+    }
+    const exported = exportPresetProfiles(nextConfig, inputs);
+    exportedProfiles = exported.profiles;
+    nextConfig = exported.text; warnings.push(...exported.warnings);
+    broadReadAccess ||= exported.broadReadAccess;
+    if (windowsBackend) nextConfig = updateWindowsSandbox(nextConfig, windowsBackend);
     if (nextConfig !== config.before) changes.push({ ...config, after: nextConfig });
     else checks.push({ path: config.path, expected: config.before });
   }
-  for (const input of [agents, access, settings]) {
+  for (const input of [configuration, settings]) {
     if (!changes.some(change => comparable(change.path) === comparable(input.path))) {
       checks.push({ path: input.path, expected: input.before });
     }
@@ -527,5 +613,5 @@ export async function buildApplyPlan(state: WorkspaceState, options: ApplyOption
   // Every destination was checked, including parent junctions, before returning the plan.
   await configResolver.assertUnchanged();
   await assertDirectoryIdentity(state.root, rootIdentity);
-  return { changes, warnings: [...new Set(warnings)], broadReadAccess, checks, pathChecks, directoryChecks: [{ path: state.root, identity: rootIdentity }] };
+  return { changes, warnings: [...new Set(warnings)], broadReadAccess, exportedProfiles, checks, pathChecks, directoryChecks: [{ path: state.root, identity: rootIdentity }] };
 }
