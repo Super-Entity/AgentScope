@@ -246,7 +246,7 @@ test('Malformed stores, unsupported versions and duplicate keys are refused with
 
 test('Preset names reject reserved keys, empty or padded text and control characters before writing', async (t) => {
   const { root } = await fixture(t);
-  for (const name of ['', ' ', ' Padded', 'Padded ', 'line\nbreak', 'x'.repeat(81), '__proto__', 'constructor', 'prototype']) {
+  for (const name of ['', ' ', ' Padded', 'Padded ', 'line\nbreak', 'line\u2028break', 'line\u2029break', ':reserved', 'x'.repeat(81), '__proto__', 'constructor', 'prototype']) {
     await assert.rejects(writePreset(root, name, snapshot()), /preset name/);
     await assert.rejects(deletePreset(root, name), /preset name/);
   }
@@ -255,6 +255,16 @@ test('Preset names reject reserved keys, empty or padded text and control charac
   const raw = `{"version":1,"presets":{"__proto__":${JSON.stringify(snapshot())}}}`;
   await fs.writeFile(storePath(root), raw);
   await assert.rejects(readPresets(root), /preset name/);
+});
+
+test('Invalid native Windows backend choices are rejected before saving a preset', async t => {
+  const { root } = await fixture(t);
+  for (const backend of ['unknown', '', null, true]) {
+    const invalid = snapshot();
+    invalid.options.codexWindowsSandbox = backend as typeof invalid.options.codexWindowsSandbox;
+    await assert.rejects(writePreset(root, 'Writing', invalid), /Windows sandbox/);
+  }
+  assert.deepEqual(await fs.readdir(root), []);
 });
 
 test('Invalid preset scope paths, project visibility or options cannot create or alter a store', async (t) => {

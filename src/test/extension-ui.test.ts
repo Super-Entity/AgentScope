@@ -603,6 +603,50 @@ test('Cancelling Update preset or returning an unavailable name does not create 
   assert.match(ui.errors[0], /preset.*(?:missing|unknown|available|changed|exist)|(?:unknown|missing).*preset/i);
 });
 
+test('Preset confirmations reject concurrent file edits instead of overwriting or deleting them', async (t) => {
+  for (const action of ['savePreset', 'updatePreset', 'deletePreset']) {
+    await t.test(action, async subtest => {
+      const ui = await activateInFixture(subtest);
+      ui.inputAnswers.push('Existing'); await ui.nativeCommand('savePreset');
+      const target = path.join(ui.root, '.vscode/agentscope-presets.json');
+      const external = parseJsoncStrict(await ui.read('.vscode/agentscope-presets.json'), 'Preset store') as Record<string, any>;
+      external.presets.Existing.options.allowNetwork = true;
+      external.owner = 'Keep the edit made while confirmation was open';
+      const concurrent = JSON.stringify(external);
+      ui.beforePresetConfirmation.push(async () => { await fs.writeFile(target, concurrent); });
+      if (action === 'savePreset') ui.inputAnswers.push('Existing');
+      else ui.quickAnswers.push('Existing');
+      ui.warningAnswers.push(action === 'deletePreset' ? 'Delete' : 'Replace');
+      await ui.nativeCommand(action);
+      assert.equal(await ui.read('.vscode/agentscope-presets.json'), concurrent);
+      assert.equal(ui.errors.length, 1);
+      assert.match(ui.errors[0], /preset.*changed|changed.*preset/i);
+    });
+  }
+});
+
+test('Activating a preset changed while its picker is open does not load a stale scope', async (t) => {
+  const ui = await activateInFixture(t);
+  ui.inputAnswers.push('Existing'); await ui.nativeCommand('savePreset');
+  const before = structuredClone(ui.scope());
+  const target = '.vscode/agentscope-presets.json';
+  const store = parseJsoncStrict(await ui.read(target), 'Preset store') as Record<string, any>;
+  store.presets.Existing.registry.submodules.project.enabled = true;
+  const concurrent = JSON.stringify(store);
+  ui.quickAnswers.push(async () => {
+    await fs.writeFile(path.join(ui.root, target), concurrent);
+    return 'Existing';
+  });
+  ui.warningAnswers.push('Load preset');
+  await ui.nativeCommand('activatePreset');
+  assert.equal(ui.errors.length, 1);
+  assert.match(ui.errors[0], /presets.*changed/i);
+  assert.deepEqual(ui.scope(), before);
+  assert.equal(ui.confirmations.length, 0);
+  assert.equal(await ui.read(target), concurrent);
+  assert.equal(await ui.read('.codex/config.toml'), ui.originals.get('.codex/config.toml'));
+});
+
 test('Untrusted workspaces cannot save, update, activate or delete presets', async (t) => {
   const ui = await activateInFixture(t, false);
   for (const action of ['savePreset', 'updatePreset', 'activatePreset', 'deletePreset']) await ui.command(action);
@@ -2189,7 +2233,7 @@ test('A preset edited while choosing a chat is rejected before publishing or ope
   });
   await ui.nativeCommand('newChat');
   assert.equal(ui.errors.length, 1);
-  assert.match(ui.errors[0], /(?:chosen preset changed.*Choose it again|Saved presets changed.*refresh)/i);
+  assert.match(ui.errors[0], /(?:chosen preset changed.*Choose it again|Saved presets changed.*refresh|input changed.*refresh)/i);
   assert.equal(ui.confirmations.length, 0);
   assert.equal(ui.executeCalls.filter(call => call.name === 'chatgpt.newChat').length, 0);
   assert.equal(await ui.read('.codex/config.toml'), ui.originals.get('.codex/config.toml'));

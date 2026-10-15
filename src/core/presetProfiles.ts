@@ -30,7 +30,7 @@ export interface PresetProfilesOutput {
 
 /** Codex shows this ID directly in its picker, so retain the user's preset label. */
 export function presetProfileName(name: string): string {
-  if (typeof name !== 'string' || name.length < 1 || name.length > 80 || name !== name.trim() || /[\x00-\x1f\x7f\u2028\u2029]/.test(name)) {
+  if (typeof name !== 'string' || name.length < 1 || name.length > 80 || name !== name.trim() || name.startsWith(':') || /[\x00-\x1f\x7f\u2028\u2029]/.test(name)) {
     throw new Error('A preset profile requires a name of 1–80 characters without surrounding whitespace or control characters.');
   }
   return `${name} - AgentScope`;

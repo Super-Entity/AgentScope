@@ -2,10 +2,10 @@
   "name": "agentscope",
   "displayName": "AgentScope",
   "description": "Manage workspace visibility and independent Codex permission profiles for saved project scopes.",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "icon": "media/icon.png",
   "publisher": "SuperEntity",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "engines": {
     "vscode": "^1.95.0"
   },

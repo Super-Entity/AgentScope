@@ -39,7 +39,7 @@ test('Preset IDs show the exact label and stay distinct across punctuation and n
     assert.equal(presetProfileName(names[index]), ids[index]);
     assert.equal(ids[index], `${names[index]} - AgentScope`);
   }
-  for (const invalid of ['', ' outer ', 'a\nb', 'x'.repeat(81)]) {
+  for (const invalid of ['', ' outer ', 'a\nb', ':reserved', 'x'.repeat(81)]) {
     assert.throws(() => presetProfileName(invalid), /preset profile requires/);
   }
 });

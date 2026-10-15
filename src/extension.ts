@@ -10,7 +10,7 @@ import { PolicyCheckpoint, checkpointKey, createCheckpoint, validateCheckpoint, 
 import { selectedState, selectionReader, togglePathSelection, AccessKind, SelectionChild, SelectionState } from './core/selection';
 import { inspectProjectEntry, listProjectChildren } from './browse';
 import { isResourcePath, listWorkspaceChildren, listWorkspaceSelectionRoots, workspaceSelectionState, resourceScope, toggleResourceSelection, toggleWorkspaceSelection, ResourceChild } from './resources';
-import { readPresets, writePreset, deletePreset, ScopePreset } from './presets';
+import { readPresetsSnapshot, validatePresetName, writePreset, deletePreset, ScopePreset } from './presets';
 import { ScopeView, ScopeViewModel, PermissionRow } from './scopeView';
 import { ApplyPlan, FileChange, WorkspaceState } from './types';
 import { CodexFilesystemMode, CodexRuntime, resolveFilesystemMode, runtimeWorkspaceRoot } from './core/runtimePaths';
@@ -806,29 +806,31 @@ export function activate(context: vscode.ExtensionContext): void {
     assertPresetSaved(current.root);
     writing = true; update();
     try {
+      const existing = await readPresetsSnapshot(current.root);
       let name: string | undefined;
       if (updateExisting) {
-        const store = await readPresets(current.root);
-        const names = Object.keys(store.presets).sort();
+        const names = Object.keys(existing.store.presets).sort();
         if (!names.length) throw new Error('No saved presets. Use Save preset first.');
         name = await vscode.window.showQuickPick(names, { title: 'AgentScope: Update preset',
           placeHolder: 'Replace this preset with the current access and visibility draft.' });
       } else {
         name = await vscode.window.showInputBox({ title: 'AgentScope: Save preset', prompt: 'Name this access and visibility configuration.',
-          value: selectedPreset ?? '', validateInput: value => !value.trim() || value.trim().length > 80 || /[\x00-\x1f\x7f]/.test(value) || ['__proto__', 'constructor', 'prototype'].includes(value.trim()) ? 'Use a name of 1–80 characters without control characters.' : undefined });
+          value: selectedPreset ?? '', validateInput: value => {
+            try { validatePresetName(value.trim()); return undefined; }
+            catch (error) { return errorMessage(error); }
+          } });
       }
       if (!name?.trim()) return;
       await ensureWritableWorkspace(current);
-      const existing = await readPresets(current.root);
-      if (updateExisting && !Object.hasOwn(existing.presets, name.trim())) throw new Error('The selected preset no longer exists. Choose it again.');
-      if (Object.hasOwn(existing.presets, name.trim())) {
+      if (updateExisting && !Object.hasOwn(existing.store.presets, name.trim())) throw new Error('The selected preset no longer exists. Choose it again.');
+      if (Object.hasOwn(existing.store.presets, name.trim())) {
         const replace = await vscode.window.showWarningMessage(`Replace preset “${name.trim()}”?`, { modal: true }, 'Replace');
         if (replace !== 'Replace') return;
       }
       const snapshot: ScopePreset = structuredClone({ registry: current.registry, hidden: current.hidden,
         resourceHidden: current.resourceHidden ?? {}, options: effectiveOptions() });
       await validatePresetWrite(current);
-      await writePreset(current.root, name.trim(), snapshot, () => validatePresetWrite(current));
+      await writePreset(current.root, name.trim(), snapshot, () => validatePresetWrite(current), existing.text);
       if (current.files) delete current.files[resolveContained(current.root, '.vscode/agentscope-presets.json')];
       selectedPreset = name.trim();
       current.dirty = true;
@@ -839,10 +841,12 @@ export function activate(context: vscode.ExtensionContext): void {
   async function activatePreset(): Promise<void> {
     trusted();
     const current = state();
+    assertPresetSaved(current.root);
     let activate = false;
     writing = true; update();
     try {
-      const store = await readPresets(current.root);
+      const snapshot = await readPresetsSnapshot(current.root);
+      const store = snapshot.store;
       const names = Object.keys(store.presets).sort();
       if (!names.length) throw new Error('No saved presets. Use Save preset first.');
       const name = await vscode.window.showQuickPick(names, { title: 'AgentScope: Activate preset', placeHolder: 'Review and apply the selected saved configuration.' });
@@ -853,7 +857,12 @@ export function activate(context: vscode.ExtensionContext): void {
         if (replace !== 'Load preset') return;
       }
       await ensureWritableWorkspace(current);
+      assertPresetSaved(current.root);
+      if ((await readPresetsSnapshot(current.root)).text !== snapshot.text) {
+        throw new Error('Saved presets changed while choosing settings. Refresh and try again.');
+      }
       const saved = structuredClone(store.presets[name]);
+      if (!saved) throw new Error('The selected preset no longer exists. Choose it again.');
       for (const module of Object.values(saved.registry.submodules)) module.instruction_file = null;
       // Newly registered projects stay disabled until the user deliberately includes them in a preset.
       for (const [projectName, module] of Object.entries(current.registry.submodules)) {
@@ -872,6 +881,8 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         resourceHidden[relative] = saved.resourceHidden[relative] === true;
       }
+      current.files ??= {};
+      current.files[resolveContained(current.root, '.vscode/agentscope-presets.json')] = snapshot.text;
       current.registry = saved.registry;
       current.hidden = Object.fromEntries(Object.keys(saved.registry.submodules).map(projectName => [projectName, saved.hidden[projectName] === true]));
       current.resourceHidden = resourceHidden;
@@ -889,13 +900,14 @@ export function activate(context: vscode.ExtensionContext): void {
     assertPresetSaved(current.root);
     writing = true; update();
     try {
-      const store = await readPresets(current.root);
-      const name = await vscode.window.showQuickPick(Object.keys(store.presets).sort(), { title: 'AgentScope: Delete preset' });
+      const snapshot = await readPresetsSnapshot(current.root);
+      const name = await vscode.window.showQuickPick(Object.keys(snapshot.store.presets).sort(), { title: 'AgentScope: Delete preset' });
       if (!name) return;
+      if (!Object.hasOwn(snapshot.store.presets, name)) throw new Error('The selected preset no longer exists. Choose it again.');
       const confirmed = await vscode.window.showWarningMessage(`Delete preset “${name}”?`, { modal: true }, 'Delete');
       if (confirmed !== 'Delete') return;
       await validatePresetWrite(current);
-      await deletePreset(current.root, name, () => validatePresetWrite(current));
+      await deletePreset(current.root, name, () => validatePresetWrite(current), snapshot.text);
       if (current.files) delete current.files[resolveContained(current.root, '.vscode/agentscope-presets.json')];
       if (selectedPreset === name) selectedPreset = null;
       current.dirty = true;
@@ -944,6 +956,11 @@ export function activate(context: vscode.ExtensionContext): void {
       publish: async () => {
         ensureWorkspace(current);
         const latest = await plan();
+        // Validate the captured inputs before offering to publish them. Planning
+        // deliberately parses the original bytes and must not adopt later edits.
+        await applyPlan({ ...latest, changes: [], checks: [
+          ...(latest.checks ?? []), ...latest.changes.map(change => ({ path: change.path, expected: change.before })),
+        ] }, () => ensureWritableWorkspace(current));
         if (!latest.exportedProfiles?.some(profile => profile.profileName === chosen?.profileName)) throw new Error('The chosen preset changed. Choose it again.');
         if (latest.changes.length) await apply(true);
         const verified = await plan();

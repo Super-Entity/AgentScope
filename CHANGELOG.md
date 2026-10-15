@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.2
+
+- Change project license to AGPL-3.0-only.
+- Preserve competing configuration edits made during the final asynchronous Apply or Restore guard by rechecking contents and parent links before writing.
+- Reject preset Save, Update and Delete when the preset file changes while a selection or confirmation dialog is open. Export the exact preset revision captured for Apply's conflict checks.
+- Merge case-equivalent grants within native Windows projects and reject project boundaries or grants that collide through different casing.
+- Stop a base profile update from overwriting a profile owned by a saved preset.
+- Reject reserved or multiline permission-profile names before storing or exporting them.
+
 ## 0.8.1
 
 - Show readable preset names such as `Review - AgentScope` in Codex Permissions, without hashes, revision suffixes or duplicate descriptions. Migrate AgentScope's older hashed entries on Apply; existing chats using an old identifier must select the new entry.

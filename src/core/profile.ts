@@ -34,11 +34,41 @@ export function generateProfile(registry: Registry, options: ProfileOptions): Pr
   const filesystemMode = resolveFilesystemMode(runtimeRoot, options.filesystemMode);
   const broadReadAccess = filesystemMode === 'windows-compatible';
   const targetPath = (target: string): string => profileTarget(root, target, runtimeRoot);
+  const windowsRuntime = /^(?:[A-Za-z]:[\\/]|[\\/]{2})/.test(runtimeRoot);
+  if (windowsRuntime) {
+    const overlaps = (first: string, second: string): boolean => {
+      const contains = (parent: string, child: string): boolean => {
+        const relative = path.win32.relative(parent, child);
+        return relative === '' || (!path.win32.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..\\'));
+      };
+      return contains(first, second) || contains(second, first);
+    };
+    const moduleRoots: string[] = [];
+    for (const module of Object.values(registry.submodules)) {
+      const moduleRoot = targetPath(resolveContained(root, module.path));
+      if (moduleRoots.some(existing => overlaps(existing, moduleRoot))) {
+        throw new Error(`Project roots overlap in the Windows runtime: ${module.path}. Case aliases could bypass a disabled project.`);
+      }
+      moduleRoots.push(moduleRoot);
+    }
+    for (const resource of [...registry.shared_resources.read_paths, ...registry.shared_resources.write_paths]) {
+      if (moduleRoots.some(moduleRoot => overlaps(moduleRoot, targetPath(resolveContained(root, resource))))) {
+        throw new Error(`Shared resource overlaps a registered project in the Windows runtime: ${resource}`);
+      }
+    }
+  }
   const entries = new Map<string, 'deny' | 'read' | 'write'>([[':root', broadReadAccess ? 'read' : 'deny'], [':minimal', 'read'], [':tmpdir', 'write']]);
+  const targetKeys = new Map([...entries.keys()].map(target => [target, target]));
+  const setEntry = (target: string, mode: 'deny' | 'read' | 'write'): void => {
+    const identity = windowsRuntime ? target.toLowerCase() : target;
+    const key = targetKeys.get(identity) ?? target;
+    const previous = entries.get(key);
+    targetKeys.set(identity, key);
+    if (previous === 'deny' || mode === 'deny') { entries.set(key, 'deny'); }
+    else if (previous !== 'write') { entries.set(key, mode); }
+  };
   const grant = (target: string, mode: 'read' | 'write'): void => {
-    const runtimeTarget = targetPath(target);
-    const previous = entries.get(runtimeTarget);
-    if (previous !== 'write') { entries.set(runtimeTarget, mode); }
+    setEntry(targetPath(target), mode);
   };
   for (const configuration of ['.gitmodules', '.codex']) { grant(resolveContained(root, configuration), 'read'); }
   for (const resource of registry.shared_resources.read_paths) { grant(resolveContained(root, resource), 'read'); }
@@ -46,7 +76,7 @@ export function generateProfile(registry: Registry, options: ProfileOptions): Pr
   for (const module of Object.values(registry.submodules)) {
     const moduleRoot = resolveContained(root, module.path);
     if (!module.enabled) {
-      if (!broadReadAccess) entries.set(targetPath(moduleRoot), 'deny');
+      if (!broadReadAccess) setEntry(targetPath(moduleRoot), 'deny');
       continue;
     }
     if (!module.restrict_paths) { grant(moduleRoot, 'write'); }
@@ -203,6 +233,13 @@ export function hasManagedCodexProfileComment(existing: string, name: string, co
   return !!owned && statements(existing.slice(owned.start, owned.end)).some(statement => statement.text.trim() === comment);
 }
 
+function presetOwner(text: string): string | undefined {
+  const owners = statements(text).map(statement => statement.text.trim())
+    .filter(statement => statement.startsWith('# AgentScope preset: '));
+  if (owners.length > 1) { throw new Error('Managed preset ownership comments are duplicated. Restore the profile before applying changes.'); }
+  return owners[0];
+}
+
 function table(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Date);
 }
@@ -297,6 +334,9 @@ export function updateCodexConfig(existing: string, profileText: string, profile
     throw new Error(`The generated text must contain only the ${profileName} permission profile.`);
   }
   const owned = findOwnedBlock(existing, profileName);
+  if (owned && presetOwner(existing.slice(owned.start, owned.end)) !== presetOwner(profileText)) {
+    throw new Error(`The ${profileName} profile has different preset ownership. Choose a different base profile name; AgentScope will not replace another profile's permissions.`);
+  }
   const existingPermissions = parsed.permissions as Record<string, unknown> | undefined;
   if (!owned && existingPermissions && Object.hasOwn(existingPermissions, profileName)) {
     throw new Error(`The ${profileName} profile is user-owned. Choose a different profile name; AgentScope will not overwrite it.`);

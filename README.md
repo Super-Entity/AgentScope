@@ -22,7 +22,7 @@ Install [AgentScope from the VS Code Marketplace](https://marketplace.visualstud
 Alternatively, download a `.vsix` from [GitHub Releases](https://github.com/Super-Entity/AgentScope/releases), then run **Extensions: Install from VSIX...** in VS Code. You do not need Node.js or npm to use the extension. VS Code 1.95 or later is required.
 
 ```sh
-code --install-extension agentscope-0.8.1.vsix
+code --install-extension agentscope-0.8.2.vsix
 ```
 
 ## Getting started
@@ -41,6 +41,8 @@ Installation, refresh and checkbox changes leave workspace configuration untouch
 Apply exports saved presets to separate entries in `.codex/config.toml`. Codex's native permissions menu displays short names such as **Review - AgentScope**, so two chats can select different project scopes without switching a shared instruction file. Selecting a profile applies to that chat; saving an AgentScope preset alone does not activate it in a running chat.
 
 Each preset has one readable profile name without hashes or revision numbers. **Update preset...** saves the current editor selections over an existing preset after a Replace confirmation; other presets keep their snapshots. Use Apply to publish the update. Updating a preset updates that named profile, so chats using the same preset can receive its new permissions when Codex reloads configuration. Use separate presets when chats need independently maintained scopes.
+
+Save, Update and Delete check that the preset file still matches the revision used to open their dialogs. If another writer changes it while a dialog is open, the operation stops so you can review the new version. Apply exports the same preset revision that its write guards verify.
 
 Apply migrates AgentScope's older hashed preset entries to these readable names. Existing chats using an older identifier must select the new entry in Codex Permissions. Unrelated user-created profiles are preserved. The `windows.sandbox` backend remains a workspace-wide setting; profiles must match the active runtime and backend.
 
@@ -62,6 +64,8 @@ Unchecking a child of a selected folder keeps its currently selected siblings. N
 
 Project Read/Write paths are relative to the project. Shared-resource paths are relative to the selected workspace. Explorer and Search visibility do not enforce filesystem permissions.
 
+For native Windows profiles, path casing does not create separate permissions. Equivalent paths within one project merge their grants; project registrations or grants that overlap another project's boundary through different casing are rejected.
+
 ## Configuration files and migration
 
 | File | Purpose |
@@ -77,7 +81,7 @@ When no new editor-state file exists, AgentScope can import a recognized legacy 
 
 Preview lists only files that would change and leaves them untouched. Existing JSONC comments, unrelated editor settings and user-owned Codex profiles are preserved. **Restore last apply** restores previous contents when the affected files still match the applied version.
 
-Save or discard unsaved configuration edits before Apply. If another writer changes a file, review the updated draft before trying again. **Recover saved configuration** restores a valid local checkpoint when available; **Reconfigure access** starts a fresh disabled draft. Neither runs automatically. Keep important configuration in version control or a separate backup.
+Save or discard unsaved configuration edits before Apply. Apply and Restore recheck file contents and parent links after awaiting their final write guard. If another writer changes a file, review the updated draft before trying again. **Recover saved configuration** restores a valid local checkpoint when available; **Reconfigure access** starts a fresh disabled draft. Neither runs automatically. Keep important configuration in version control or a separate backup.
 
 ## Runtime and Windows sandbox
 
@@ -111,6 +115,7 @@ Search for `agentscope` in VS Code Settings.
 | `codexRuntime` | `auto` | Target the native OS or WSL runtime |
 | `codexWorkspaceRoot` | empty | Override the absolute workspace path inside the Codex runtime |
 | `codexFilesystemMode` | `auto` | Verify native Windows MXC, fall back to Windows compatibility, or choose an explicit mode |
+| `codexWindowsSandbox` | `auto` | Verify MXC and use it when available; `mxc` requires successful verification, while `legacy` selects the elevated Windows backend |
 | `promptPresetForNewChat` | `false` | Route Codex's Ctrl+N through AgentScope's preset picker; the main New Codex chat button always shows the picker |
 | `excludeFromSearch` | `true` | Apply visibility choices to Search as well as Explorer |
 | `allowCommandNetwork` | `false` | Request network access for local commands |
@@ -131,4 +136,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) to build, test or contribute. GitHub Acti
 
 ## License
 
-[MIT](LICENSE).
+[AGPL-3.0-only](LICENSE).

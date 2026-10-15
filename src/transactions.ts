@@ -99,8 +99,10 @@ async function stage(operation: WriteOperation, directories: Set<string>): Promi
 }
 
 async function commit(staged: StagedWrite, beforePublish?: () => void | Promise<void>): Promise<void> {
-  await assertExpected(staged);
   await beforePublish?.();
+  // Awaiting a final UI/trust guard gives other writers time to change the file
+  // or replace its parent. Recheck afterwards so those edits are not overwritten.
+  await assertExpected(staged);
   if (staged.replacement === null) {
     if (staged.expected !== null) await fs.unlink(staged.path);
   } else {

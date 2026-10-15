@@ -6,7 +6,7 @@ import { generateProfile, updateCodexConfig } from './core/profile';
 import { CodexFilesystemMode, CodexRuntime, resolveFilesystemMode, runtimeWorkspaceRoot } from './core/runtimePaths';
 import { ACCESS_POLICY_FILE, detachLegacyInstructions, emptyRegistry, legacyRegistryJsonc, parseGitmodules, parseJsoncStrict, readAccessRegistry, readAgentsRegistry, validateRegistry } from './core/registry';
 import { SCOPE_CONFIGURATION_FILE, readScopeConfiguration, writeScopeConfiguration } from './configuration';
-import { readPresets } from './presets';
+import { readPresetsFromText } from './presets';
 import { exportPresetProfiles } from './core/presetProfiles';
 import { detectWindowsSandbox, WindowsSandboxDetection } from './windowsSandbox';
 import { updateWindowsSandbox } from './core/windowsConfig';
@@ -567,9 +567,9 @@ export async function buildApplyPlan(state: WorkspaceState, options: ApplyOption
     const config = await expectedConfiguration(state, codexFile, configResolver);
     let nextConfig = updateCodexConfig(config.before ?? '', profile.text, options.profileName);
     const presetFile = await expectedConfiguration(state, '.vscode/agentscope-presets.json', configResolver);
-    const store = await readPresets(state.root);
-    // readPresets validates the file independently; retain its exact input for transaction guards.
-    if (await readOptional(presetFile.path) !== presetFile.before) throw new Error('Saved presets changed while planning; refresh and try again.');
+    // Parse the exact bytes retained by transaction guards. Re-reading and then
+    // comparing another read can miss an A -> B -> A change and export B's grants.
+    const store = readPresetsFromText(presetFile.before, state.root);
     checks.push({ path: presetFile.path, expected: presetFile.before });
     const inputs = [];
     for (const [name, preset] of Object.entries(store.presets)) {

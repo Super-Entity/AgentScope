@@ -29,9 +29,9 @@ const missing = (error: unknown): boolean => (error as NodeJS.ErrnoException)?.c
 const samePath = (first: string, second: string): boolean => process.platform === 'win32'
   ? path.resolve(first).toLowerCase() === path.resolve(second).toLowerCase() : path.resolve(first) === path.resolve(second);
 
-function validateName(name: string): void {
+export function validatePresetName(name: string): void {
   if (typeof name !== 'string' || name !== name.trim() || name.length < 1 || name.length > 80
-    || /[\x00-\x1f\x7f]/.test(name) || ['__proto__', 'constructor', 'prototype'].includes(name)) {
+    || /[\x00-\x1f\x7f\u2028\u2029]/.test(name) || name.startsWith(':') || ['__proto__', 'constructor', 'prototype'].includes(name)) {
     throw new Error('A preset name must contain 1–80 characters without surrounding whitespace, control characters or reserved object names.');
   }
 }
@@ -40,6 +40,9 @@ function validateOptions(value: unknown): asserts value is ApplyOptions {
   if (!object(value) || ['generateCodexProfile', 'excludeFromSearch', 'allowNetwork'].some(field => typeof value[field] !== 'boolean')
     || typeof value.profileName !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(value.profileName)) {
     throw new Error('Preset options require boolean generation, search and network settings and a valid permission profile name.');
+  }
+  if (value.codexWindowsSandbox !== undefined && !['auto', 'mxc', 'legacy'].includes(value.codexWindowsSandbox as string)) {
+    throw new Error('Preset Windows sandbox must be auto, mxc or legacy.');
   }
 }
 
@@ -86,7 +89,7 @@ function parseStore(text: string | null, root: string): PresetStore {
     throw new Error('AgentScope presets must use version 1 and contain a presets object.');
   }
   for (const [name, preset] of Object.entries(value.presets)) {
-    validateName(name);
+    validatePresetName(name);
     validatePreset(preset, root);
   }
   return value as unknown as PresetStore;
@@ -120,6 +123,16 @@ async function readStored(root: string): Promise<StoredPresets> {
 
 export async function readPresets(root: string): Promise<PresetStore> {
   return structuredClone((await readStored(root)).store);
+}
+
+export async function readPresetsSnapshot(root: string): Promise<{ store: PresetStore; text: string | null }> {
+  const stored = await readStored(root);
+  return { store: structuredClone(stored.store), text: stored.text };
+}
+
+/** Plan from the exact captured input, rather than rereading a possibly different file. */
+export function readPresetsFromText(text: string | null, root: string): PresetStore {
+  return structuredClone(parseStore(text, root));
 }
 
 function equivalent(first: unknown, second: unknown): boolean {
@@ -245,9 +258,10 @@ async function save(stored: StoredPresets, text: string, validateBeforeWrite?: (
 }
 
 /** Save a named draft only. Applying its permissions is a separate ordinary Apply operation. */
-export async function writePreset(root: string, name: string, preset: ScopePreset, validateBeforeWrite?: () => void | Promise<void>): Promise<void> {
-  validateName(name);
+export async function writePreset(root: string, name: string, preset: ScopePreset, validateBeforeWrite?: () => void | Promise<void>, expectedStoreText?: string | null): Promise<void> {
+  validatePresetName(name);
   const stored = await readStored(root);
+  if (expectedStoreText !== undefined && stored.text !== expectedStoreText) throw new Error('Saved presets changed while choosing settings. Refresh and try again.');
   const snapshot = structuredClone(preset);
   validatePreset(snapshot, stored.root);
   // Preserve annotations at every level, while the draft owns map membership and permissions.
@@ -255,9 +269,10 @@ export async function writePreset(root: string, name: string, preset: ScopePrese
   await save(stored, editPreset(stored, name, next), validateBeforeWrite);
 }
 
-export async function deletePreset(root: string, name: string, validateBeforeWrite?: () => void | Promise<void>): Promise<void> {
-  validateName(name);
+export async function deletePreset(root: string, name: string, validateBeforeWrite?: () => void | Promise<void>, expectedStoreText?: string | null): Promise<void> {
+  validatePresetName(name);
   const stored = await readStored(root);
+  if (expectedStoreText !== undefined && stored.text !== expectedStoreText) throw new Error('Saved presets changed while choosing settings. Refresh and try again.');
   if (!Object.hasOwn(stored.store.presets, name)) return;
   await save(stored, editPreset(stored, name, undefined), validateBeforeWrite);
 }

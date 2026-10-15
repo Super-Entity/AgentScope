@@ -143,3 +143,51 @@ test('A root replaced after temporary staging is rejected before publishing conf
   assert.deepEqual(await fs.readdir(root), []);
   await assert.rejects(fs.stat(path.join(root + '-original', 'AGENTS.md')), { code: 'ENOENT' });
 });
+
+test('Apply preserves an external edit made while its final publish guard is pending', async (t) => {
+  const { root } = await fixture(t);
+  const target = path.join(root, 'configuration.json');
+  await fs.writeFile(target, 'original');
+  let guards = 0;
+  await assert.rejects(applyPlan({ warnings: [], changes: [
+    { path: target, before: 'original', after: 'planned update' },
+  ] }, async () => {
+    if (++guards === 3) await fs.writeFile(target, 'external edit during final guard');
+  }), /changed.*refresh/i);
+  assert.equal(await fs.readFile(target, 'utf8'), 'external edit during final guard');
+  assert.deepEqual(await fs.readdir(root), ['configuration.json']);
+});
+
+test('Undo preserves a competing edit made during the final guard for a newly created file', async (t) => {
+  const { root } = await fixture(t);
+  const target = path.join(root, 'configuration.json');
+  const changes = await applyPlan({ warnings: [], changes: [
+    { path: target, before: null, after: 'applied configuration' },
+  ] });
+  let guards = 0;
+  await assert.rejects(restoreChanges(changes, async () => {
+    if (++guards === 3) await fs.writeFile(target, 'external edit during final undo guard');
+  }), /changed.*refresh/i);
+  assert.equal(await fs.readFile(target, 'utf8'), 'external edit during final undo guard');
+});
+
+test('Apply rechecks configuration parent links after awaiting the final publish guard', async (t) => {
+  const { root, outside } = await fixture(t);
+  const parent = path.join(root, '.vscode');
+  const retained = path.join(root, 'retained-configuration');
+  const target = path.join(parent, 'settings.json');
+  await fs.mkdir(parent);
+  await fs.writeFile(target, 'original');
+  await fs.writeFile(path.join(outside, 'settings.json'), 'original');
+  let guards = 0;
+  await assert.rejects(applyPlan({ warnings: [], changes: [
+    { path: target, before: 'original', after: 'planned update' },
+  ] }, async () => {
+    if (++guards === 3) {
+      await fs.rename(parent, retained);
+      await directoryLink(outside, parent);
+    }
+  }), /parent.*symbolic link|symbolic.*parent/i);
+  assert.equal(await fs.readFile(path.join(outside, 'settings.json'), 'utf8'), 'original');
+  assert.equal(await fs.readFile(path.join(retained, 'settings.json'), 'utf8'), 'original');
+});

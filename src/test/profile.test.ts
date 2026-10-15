@@ -295,3 +295,54 @@ test('Legacy sandbox conflicts and user-owned profiles are refused without overw
   assert.throws(() => updateCodexConfig('[permissions.agentscope.filesystem]\n":root" = "read"\n', generated, 'agentscope'), /user-owned/);
   assert.throws(() => updateCodexConfig('invalid = [\n', generated, 'agentscope'), /invalid TOML/);
 });
+
+test('Windows permission targets differing only by case retain one effective write grant', async (t) => {
+  const { root } = await fixture(t);
+  const value = emptyRegistry();
+  value.submodules.project = project({ read_paths: ['Data'], write_paths: ['data'] });
+  for (const filesystemMode of ['strict', 'windows-compatible'] as const) {
+    const output = generateProfile(value, {
+      root, runtimeRoot: 'D:\\MyApps', filesystemMode, profileName: 'agentscope', allowNetwork: false,
+    });
+    const paths = Object.entries(parsedProfile(output.text).filesystem)
+      .filter(([target]) => target.toLowerCase() === 'd:\\myapps\\project\\data');
+    assert.equal(paths.length, 1, 'Case aliases must not produce ambiguous Windows permission entries');
+    assert.equal(paths[0][1], 'write');
+  }
+});
+
+test('POSIX permission targets keep case-sensitive read and write scopes separate', async (t) => {
+  const { root } = await fixture(t);
+  const value = emptyRegistry();
+  value.submodules.project = project({ read_paths: ['Data'], write_paths: ['data'] });
+  const output = parsedProfile(generateProfile(value, {
+    root, runtimeRoot: '/workspace', profileName: 'agentscope', allowNetwork: false,
+  }).text);
+  assert.equal(output.filesystem['/workspace/project/Data'], 'read');
+  assert.equal(output.filesystem['/workspace/project/data'], 'write');
+});
+
+test('Mapping POSIX case aliases to Windows cannot reopen disabled projects through another project or shared resource',
+  { skip: process.platform === 'win32' ? 'The local Windows registry validator already rejects these aliases.' : false }, async (t) => {
+    const { root } = await fixture(t);
+    for (const sharedResource of [false, true]) {
+      const value = emptyRegistry();
+      value.submodules.secret = project({ path: 'Secret', enabled: false, restrict_paths: false });
+      if (sharedResource) value.shared_resources.write_paths = ['secret'];
+      else value.submodules.alias = project({ path: 'secret', restrict_paths: false });
+      assert.throws(() => generateProfile(value, {
+        root, runtimeRoot: 'D:\\MyApps', filesystemMode: 'strict', profileName: 'agentscope', allowNetwork: false,
+      }), /overlap.*Windows runtime/);
+    }
+  });
+
+test('Managed preset ownership cannot be replaced by a base profile or another preset', async (t) => {
+  const { root } = await fixture(t);
+  const profileName = 'Project - AgentScope';
+  const generated = generateProfile(emptyRegistry(), { root, profileName, allowNetwork: false }).text;
+  const preset = '# AgentScope preset: "Project"\n' + generated;
+  const source = updateCodexConfig('', preset, profileName, false);
+  assert.throws(() => updateCodexConfig(source, generated, profileName), /preset|ownership/);
+  assert.throws(() => updateCodexConfig(source, '# AgentScope preset: "Another"\n' + generated, profileName, false), /preset|ownership/);
+  assert.equal(updateCodexConfig(source, preset, profileName, false), source);
+});

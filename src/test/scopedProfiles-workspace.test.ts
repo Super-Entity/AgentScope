@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import * as fs from 'node:fs/promises';
+import fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import * as TOML from '@iarna/toml';
@@ -97,6 +97,32 @@ test('Saved presets use readable independent profiles and update only the select
   assert.deepEqual(parsed(updated).permissions[b.profileName], config.permissions[b.profileName], 'Updating First leaves the independent Second preset unchanged');
   assert.equal(parsed(updated).permissions[latest.profileName].filesystem[target('project/drafts')], undefined);
   assert.ok(updated.warnings.some(warning => /Updating this named profile/.test(warning)));
+});
+
+test('Exported preset grants come from the same snapshot retained by transaction guards', async t => {
+  const { root } = await fixture(t);
+  const value = await initialize(root);
+  await writePreset(root, 'Saved', { registry: value, hidden: {}, resourceHidden: {}, options });
+  const target = path.join(root, '.vscode/agentscope-presets.json');
+  const original = await fs.readFile(target, 'utf8');
+  const transient = JSON.parse(original);
+  transient.presets.Saved.registry.submodules.project.write_paths = ['transient-only'];
+  const realRead = fs.readFile.bind(fs);
+  let presetReads = 0;
+  t.mock.method(fs, 'readFile', async (...args: Parameters<typeof fs.readFile>) => {
+    if (String(args[0]) === target) {
+      presetReads++;
+      // Simulate A -> B -> A during planning: the final contents match the
+      // guarded snapshot, but parsing a separate read would export B's grants.
+      return presetReads === 2 ? JSON.stringify(transient) : original;
+    }
+    return realRead(...args);
+  });
+  const plan = await buildApplyPlan(await loadWorkspace(root), options);
+  assert.equal(plan.checks!.find(check => check.path === target)!.expected, original);
+  const saved = parsed(plan).permissions[plan.exportedProfiles![0].profileName].filesystem;
+  assert.equal(saved[path.join(root, 'project/drafts')], 'write');
+  assert.equal(saved[path.join(root, 'project/transient-only')], undefined);
 });
 
 test('Verified MXC pins its backend and Auto generates strict native Windows profiles for every preset', async t => {
