@@ -131,34 +131,38 @@ jobs:
           import zipfile
           from pathlib import Path
 
+          def fail(message):
+              print(f'::error::{message}', flush=True)
+              raise SystemExit(1)
+
           manifest = json.loads(Path('package.json').read_text())
           version = manifest['version']
           if not re.fullmatch(r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', version):
-              raise SystemExit('Marketplace publishing requires a stable package version.')
+              fail('Marketplace publishing requires a stable package version.')
           if (manifest['publisher'], manifest['name']) != ('SuperEntity', 'agentscope'):
-              raise SystemExit('Unexpected Marketplace publisher or extension name.')
+              fail('Unexpected Marketplace publisher or extension name.')
           if os.environ.get('GITHUB_REF', '').startswith('refs/tags/') and os.environ['GITHUB_REF_NAME'] != f'v{version}':
-              raise SystemExit('The release tag must match the package version.')
+              fail('The release tag must match the package version.')
           artifact = Path('artifacts') / f'agentscope-{version}.vsix'
           with zipfile.ZipFile(artifact) as archive:
               bundled = json.loads(archive.read('extension/package.json'))
               if any(bundled[key] != manifest[key] for key in ('publisher', 'name', 'version')) or archive.testzip() is not None:
-                  raise SystemExit('The tested VSIX does not match this extension and version.')
+                  fail('The tested VSIX does not match this extension and version.')
 
           mode = os.environ.get('MARKETPLACE_AUTH', '').strip() or 'auto'
           client = bool(os.environ.get('AZURE_CLIENT_ID', '').strip())
           tenant = bool(os.environ.get('AZURE_TENANT_ID', '').strip())
           pat = bool(os.environ.get('VSCE_PAT', '').strip())
           if mode not in ('auto', 'azure', 'pat'):
-              raise SystemExit('MARKETPLACE_AUTH must be auto, azure, or pat.')
+              fail('MARKETPLACE_AUTH must be auto, azure, or pat.')
           if mode == 'auto':
               if client != tenant:
-                  raise SystemExit('Set both AZURE_CLIENT_ID and AZURE_TENANT_ID, or remove the incomplete Azure configuration.')
+                  fail('Set both AZURE_CLIENT_ID and AZURE_TENANT_ID, or remove the incomplete Azure configuration.')
               mode = 'azure' if client and tenant else 'pat'
           if mode == 'azure' and not (client and tenant):
-              raise SystemExit('Azure publishing requires AZURE_CLIENT_ID and AZURE_TENANT_ID Actions variables.')
+              fail('Azure publishing requires AZURE_CLIENT_ID and AZURE_TENANT_ID Actions variables.')
           if mode == 'pat' and not pat:
-              raise SystemExit('Marketplace publishing is not configured. Configure Microsoft Entra federation or the VSCE_PAT Actions secret in GitHub settings.')
+              fail('Marketplace publishing is not configured. Configure Microsoft Entra federation or the VSCE_PAT Actions secret in GitHub settings.')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'auth={mode}\nartifact={artifact.as_posix()}\n')
           digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
