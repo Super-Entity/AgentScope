@@ -127,6 +127,22 @@ test('Sandbox details are collapsed below the permission table', async (t) => {
   assert.ok(html.indexOf('</table>') < html.indexOf('<details id="sandbox-details"'));
 });
 
+test('Workspace location and recovery controls are part of the static shell without embedded paths', async (t) => {
+  const ScopeView = loadProvider(t);
+  const provider = new ScopeView(MockUri.file(path.join(process.cwd(), 'virtual-extension')), async () => undefined, initialModel);
+  t.after(() => { provider.dispose(); });
+  const view = mockView();
+  await provider.resolveWebviewView(view);
+  const html = view.webview.html;
+  assert.match(html, /id="workspace-path" class="workspace-path" hidden/);
+  assert.match(html, /id="codex-workspace-path" class="workspace-path" hidden/);
+  assert.match(html, /id="chat-help" class="chat-help"/);
+  const actions = html.match(/<p id="configuration-actions"[^>]*>([\s\S]*?)<\/p>/)?.[1];
+  assert.ok(actions);
+  assert.match(actions, /id="open-workspace-folder"[^>]*data-command="openWorkspaceFolder" hidden>Open current folder…/);
+  assert.match(actions, /id="reconfigure-access"/);
+});
+
 test('Scope HTML uses a fresh nonce CSP, external webview assets and a default deny policy', async (t) => {
   const ScopeView = loadProvider(t);
   const extensionUri = MockUri.file(path.join(process.cwd(), 'virtual-extension'));

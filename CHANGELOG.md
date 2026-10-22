@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.4
+
+- Detect missing or moved workspace folders before configuration changes or new-chat preparation; show the full path and an action to open the current location without recreating the old folder or changing trust.
+- Show the selected workspace and configured Codex paths in the panel, and explain reopening a relocated folder before selecting its preset in a fresh Codex chat.
+
 ## 0.8.3
 
 - Make the logo's horizontal and vertical connectors equal in length in both SVG and PNG icons, keeping the design centered.

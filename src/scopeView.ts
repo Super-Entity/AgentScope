@@ -23,6 +23,9 @@ export interface PermissionRow {
 export interface ScopeViewModel {
   workspaceId: number;
   workspace: string | null;
+  workspacePath?: string;
+  codexWorkspacePath?: string;
+  workspaceUnavailable?: boolean;
   caseSensitive: boolean;
   trusted: boolean;
   busy: boolean;
@@ -116,6 +119,8 @@ export class ScopeView implements vscode.WebviewViewProvider, vscode.Disposable 
 <body>
   <header>
     <button id="workspace" class="workspace" data-command="selectWorkspace" title="Select the workspace folder to manage">Select workspace</button>
+    <p id="workspace-path" class="workspace-path" hidden></p>
+    <p id="codex-workspace-path" class="workspace-path" hidden></p>
     <div class="toolbar" role="toolbar" aria-label="Workspace actions">
       <button class="icon-button" data-command="refresh" title="Refresh configuration" aria-label="Refresh configuration">${icon('<path d="M20 5v5h-5M20 10a8 8 0 1 0 0 4"/>')}<span class="sr-only">Refresh</span></button>
       <button class="icon-button" id="collapse-all" title="Collapse all expanded projects and workspace folders" aria-label="Collapse all expanded folders">${icon('<path d="m7 10 5-5 5 5M7 19l5-5 5 5"/>')}<span class="sr-only">Collapse all</span></button>
@@ -152,11 +157,11 @@ export class ScopeView implements vscode.WebviewViewProvider, vscode.Disposable 
     </div>
   </header>
   <button id="new-codex-chat" class="new-chat primary" data-command="newChat">New Codex chat</button>
-  <p class="chat-help">Choose a preset, then select it in Codex Permissions.</p>
+  <p id="chat-help" class="chat-help">Choose a preset, then select it in Codex Permissions.</p>
   <p id="status" role="status" aria-live="polite">Loading workspace…</p>
   <p id="preset" class="preset-status" role="status" aria-live="polite" hidden></p>
   <p id="notice" class="notice" hidden></p>
-  <p id="configuration-actions" class="configuration-actions" hidden><button type="button" class="link-button" data-command="reconfigure" title="Start fresh Read and Write selections, then Apply">Reconfigure access</button><button id="recover-saved" type="button" class="link-button" data-command="recover" title="Restore the last saved AgentScope selections" hidden>Recover saved configuration</button></p>
+  <p id="configuration-actions" class="configuration-actions" hidden><button id="open-workspace-folder" type="button" class="link-button" data-command="openWorkspaceFolder" hidden>Open current folder…</button><button id="reconfigure-access" type="button" class="link-button" data-command="reconfigure" title="Start fresh Read and Write selections, then Apply">Reconfigure access</button><button id="recover-saved" type="button" class="link-button" data-command="recover" title="Restore the last saved AgentScope selections" hidden>Recover saved configuration</button></p>
   <div class="table-wrap">
     <table id="permissions" role="treegrid" aria-label="Project and workspace file permissions">
       <thead><tr><th scope="col">Folder / path</th><th scope="col" class="permission-heading">Read</th><th scope="col" class="permission-heading">Write</th><th scope="col"><span class="sr-only">Path actions</span></th></tr></thead>

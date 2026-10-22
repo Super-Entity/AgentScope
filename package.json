@@ -2,7 +2,7 @@
   "name": "agentscope",
   "displayName": "AgentScope",
   "description": "Manage workspace visibility and independent Codex permission profiles for saved project scopes.",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "icon": "media/icon.png",
   "publisher": "SuperEntity",
   "license": "AGPL-3.0-only",
@@ -156,6 +156,11 @@
       {
         "command": "agentscope.openCodex",
         "title": "Open Codex workspace configuration",
+        "category": "AgentScope"
+      },
+      {
+        "command": "agentscope.openWorkspaceFolder",
+        "title": "Open workspace at its current location",
         "category": "AgentScope"
       },
       {

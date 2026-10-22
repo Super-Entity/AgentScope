@@ -394,6 +394,76 @@ async function activateInFixture(t: TestContext, isTrusted = true, failBackupSav
     beforePresetInput, beforePresetConfirmation, beforeBackupSave, openAnswers, removeSelectedWorkspace, fireConfigurationChange };
 }
 
+test('A moved workspace stops new chats and exposes its old full path without recreating it', async (t) => {
+  const ui = await activateInFixture(t);
+  ui.inputAnswers.push('Writing');
+  await ui.nativeCommand('savePreset');
+  const presetBefore = await ui.read('.vscode/agentscope-presets.json');
+  const moved = `${ui.root}-relocated`;
+  await fs.rename(ui.root, moved);
+  t.after(() => fs.rm(moved, { recursive: true, force: true }));
+  await ui.nativeCommand('newChat');
+  assert.equal(ui.state().workspaceUnavailable, true);
+  assert.equal(ui.state().workspacePath, ui.root);
+  assert.equal(ui.state().projects.length, 0);
+  assert.ok(ui.state().configurationError?.includes(ui.root));
+  assert.match(ui.errors.at(-1)!, /reopen.*current location.*new Codex chat/i);
+  assert.equal(ui.executeCalls.filter(call => call.name === 'chatgpt.newChat').length, 0);
+  assert.equal(ui.confirmations.length, 0);
+  await assert.rejects(fs.stat(ui.root), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(path.join(moved, '.vscode/agentscope-presets.json'), 'utf8'), presetBefore);
+  assert.equal(await fs.readFile(path.join(moved, '.codex/config.toml'), 'utf8'), ui.originals.get('.codex/config.toml'));
+});
+
+test('A missing startup workspace can be reopened at its current location in Restricted Mode', async (t) => {
+  let moved = '';
+  const ui = await activateInFixture(t, false, false, {}, async root => {
+    moved = `${root}-relocated`;
+    await fs.rename(root, moved);
+    t.after(() => fs.rm(moved, { recursive: true, force: true }));
+  });
+  assert.equal(ui.state().workspaceUnavailable, true);
+  assert.equal(ui.state().trusted, false);
+  assert.deepEqual(ui.errors, [], 'Background load keeps the diagnosis in the panel');
+  ui.openAnswers.push([MockUri.file(moved)]);
+  await ui.command('openWorkspaceFolder');
+  const opened = ui.executeCalls.filter(call => call.name === 'vscode.openFolder');
+  assert.equal(opened.length, 1);
+  assert.equal((opened[0].args[0] as MockUri).fsPath, moved);
+  assert.equal(opened[0].args[1], true, 'Preserve the old window and draft');
+  assert.equal(ui.state().trusted, false, 'Opening a folder must not grant workspace trust');
+  await assert.rejects(fs.stat(ui.root), { code: 'ENOENT' });
+  assert.deepEqual(ui.errors, []);
+});
+
+test('Cancelling or selecting an invalid relocation target preserves the current workspace', async (t) => {
+  const ui = await activateInFixture(t);
+  await ui.nativeCommand('openWorkspaceFolder');
+  assert.equal(ui.executeCalls.filter(call => call.name === 'vscode.openFolder').length, 0);
+  ui.openAnswers.push([MockUri.file(path.join(ui.root, 'missing-folder'))]);
+  await ui.nativeCommand('openWorkspaceFolder');
+  assert.equal(ui.state().workspaceUnavailable, false);
+  assert.equal(ui.state().configurationError, null);
+  assert.equal(ui.state().workspacePath, ui.root);
+  assert.equal(ui.state().projects.length, 1);
+  assert.equal(ui.executeCalls.filter(call => call.name === 'vscode.openFolder').length, 0);
+  assert.equal(ui.errors.length, 1);
+});
+
+test('The panel exposes full configured Codex paths without claiming to inspect the native chat', async (t) => {
+  const ui = await activateInFixture(t);
+  assert.equal(ui.state().workspacePath, ui.root);
+  assert.equal(ui.state().codexWorkspacePath, ui.root);
+  ui.configuration.codexRuntime = 'wsl';
+  ui.configuration.codexWorkspaceRoot = '/mnt/d/Nexus';
+  ui.fireConfigurationChange('agentscope.codexRuntime');
+  await ui.waitForState(model => model.codexWorkspacePath === '/mnt/d/Nexus');
+  ui.configuration.codexWorkspaceRoot = 'invalid-relative-root';
+  ui.fireConfigurationChange('agentscope.codexWorkspaceRoot');
+  await ui.waitForState(model => model.codexWorkspacePath === undefined);
+  assert.equal(ui.state().workspacePath, ui.root);
+});
+
 /** Expand actual rows lazily; there are two access values on each returned file/folder. */
 async function findPathRow(ui: Awaited<ReturnType<typeof activateInFixture>>, relative: string, projectName = 'project'): Promise<PermissionRow> {
   let parent = '.';

@@ -9,7 +9,12 @@
   const scopeNotice = document.getElementById('scope-notice');
   const configurationActions = document.getElementById('configuration-actions');
   const recoverSaved = document.getElementById('recover-saved');
+  const reconfigureAccess = document.getElementById('reconfigure-access');
+  const openWorkspaceFolder = document.getElementById('open-workspace-folder');
   const workspace = document.getElementById('workspace');
+  const workspacePath = document.getElementById('workspace-path');
+  const codexWorkspacePath = document.getElementById('codex-workspace-path');
+  const chatHelp = document.getElementById('chat-help');
   const collapseAllButton = document.getElementById('collapse-all');
   const menus = [...document.querySelectorAll('.toolbar .more')];
   const nodes = new Map();
@@ -31,8 +36,9 @@
   const normalized = value => value.replace(/\\/g, '/').split('/').filter(part => part && part !== '.').join('/') || '.';
   const compare = value => model && !model.caseSensitive ? value.toLowerCase() : value;
   const contains = (ancestor, target) => ancestor === '.' || compare(ancestor) === compare(target) || compare(target).startsWith(`${compare(ancestor)}/`);
-  const readOnlyCommands = new Set(['refresh', 'selectWorkspace', 'preview', 'openConfiguration', 'openCodex']);
-  const configurationErrorCommands = new Set(['refresh', 'selectWorkspace', 'openConfiguration', 'openCodex', 'restore', 'recover', 'reconfigure']);
+  const locationCommands = new Set(['refresh', 'selectWorkspace', 'openWorkspaceFolder']);
+  const readOnlyCommands = new Set([...locationCommands, 'preview', 'openConfiguration', 'openCodex']);
+  const configurationErrorCommands = new Set([...locationCommands, 'openConfiguration', 'openCodex', 'restore', 'recover', 'reconfigure']);
 
   function element(tag, className, text) {
     const result = document.createElement(tag);
@@ -50,7 +56,7 @@
   }
 
   function unavailable(command) {
-    return !model || model.busy || pendingMutation || (!model.workspace && command !== 'selectWorkspace' && command !== 'refresh') ||
+    return !model || model.busy || pendingMutation || ((!model.workspace || model.workspaceUnavailable) && !locationCommands.has(command)) ||
       (command === 'recover' && model.recoveryAvailable !== true) ||
       (command === 'restore' && model.restoreAvailable !== true) ||
       (Boolean(model.configurationError) && !configurationErrorCommands.has(command)) || (!model.trusted && !readOnlyCommands.has(command));
@@ -125,7 +131,7 @@
   }
 
   function requestChildren(node) {
-    if (!model || model.configurationError || model.busy || node.loading || !node.row.directory) return;
+    if (!model || model.configurationError || model.workspaceUnavailable || model.busy || node.loading || !node.row.directory) return;
     node.loading = true;
     node.error = '';
     node.requestId = ++requestCounter;
@@ -133,7 +139,7 @@
   }
 
   function expand(node) {
-    if (!node.row.directory || !model || model.configurationError || model.busy || pendingMutation) return;
+    if (!node.row.directory || !model || model.configurationError || model.workspaceUnavailable || model.busy || pendingMutation) return;
     node.expanded = !node.expanded;
     if (node.expanded && !node.loaded) requestChildren(node);
     render();
@@ -327,7 +333,14 @@
     else if (active.dataset.access || active.dataset.action) desiredFocus = { key: activeRow.dataset.key, access: active.dataset.access, action: active.dataset.action };
     else if (!desiredFocus) desiredFocus = { key: activeRow.dataset.key };
     workspace.textContent = model.workspace || 'Select workspace';
-    workspace.title = model.workspace || 'Select the workspace folder to manage';
+    workspace.title = model.workspacePath || model.workspace || 'Select the workspace folder to manage';
+    workspacePath.hidden = typeof model.workspacePath !== 'string' || !model.workspacePath;
+    workspacePath.textContent = workspacePath.hidden ? '' : `Workspace: ${model.workspacePath}`;
+    codexWorkspacePath.hidden = typeof model.codexWorkspacePath !== 'string' || !model.codexWorkspacePath;
+    codexWorkspacePath.textContent = codexWorkspacePath.hidden ? '' : `Configured Codex path: ${model.codexWorkspacePath}`;
+    chatHelp.textContent = model.workspaceUnavailable ? 'Open the current folder, then choose a preset for a new Codex chat.' :
+      codexWorkspacePath.hidden ? 'Choose a preset, then select it in Codex Permissions.' :
+      `In Codex, select workspace “${model.codexWorkspacePath}”, then select the chosen preset in Permissions.`;
     status.textContent = model.busy || pendingMutation ? 'Updating…' : model.message || (model.dirty ? 'Draft changes — Preview, then Apply' : 'Saved configuration');
     if (model.configurationError) status.textContent = model.configurationError;
     preset.hidden = Boolean(model.configurationError) || typeof model.preset !== 'string' || !model.preset;
@@ -345,13 +358,19 @@
     const warnings = [];
     if (!model.trusted) warnings.push('Restricted Mode: trust this workspace to change permissions.');
     if (!model.workspace) warnings.push('Open a local workspace folder to manage its permissions.');
-    if (model.configurationError) warnings.push(model.trusted ? 'Use Reconfigure access to select permissions again, or Recover saved configuration when available.' : 'Trust this workspace to reconfigure or recover. Files repaired on disk are reloaded automatically.');
+    if (model.workspaceUnavailable) warnings.push('Workspace folder is unavailable. Open its current location to load presets and permissions.');
+    else if (model.configurationError) warnings.push(model.trusted ? 'Use Reconfigure access to select permissions again, or Recover saved configuration when available.' : 'Trust this workspace to reconfigure or recover. Files repaired on disk are reloaded automatically.');
     notice.hidden = !warnings.length;
     notice.textContent = warnings.join(' ');
-    configurationActions.hidden = !model.configurationError;
-    recoverSaved.hidden = model.recoveryAvailable !== true;
+    configurationActions.hidden = !model.configurationError && !model.workspaceUnavailable && Boolean(model.workspace);
+    openWorkspaceFolder.hidden = !model.workspaceUnavailable && Boolean(model.workspace);
+    reconfigureAccess.hidden = Boolean(model.workspaceUnavailable) || !model.configurationError;
+    recoverSaved.hidden = Boolean(model.workspaceUnavailable) || model.recoveryAvailable !== true;
     document.getElementById('permissions').setAttribute('aria-busy', String(model.busy || pendingMutation));
-    for (const button of document.querySelectorAll('[data-command]')) button.disabled = unavailable(button.dataset.command);
+    for (const button of document.querySelectorAll('[data-command]')) {
+      button.disabled = unavailable(button.dataset.command);
+      if (['reconfigure', 'recover'].includes(button.dataset.command) && button !== reconfigureAccess && button !== recoverSaved) button.hidden = Boolean(model.workspaceUnavailable);
+    }
     for (const menu of menus) {
       const disabled = [...menu.querySelectorAll('[data-command]')].every(button => button.disabled);
       menu.querySelector('summary').setAttribute('aria-disabled', String(disabled));
@@ -362,11 +381,11 @@
     rowElements.clear();
     visibleKeys.length = 0;
     visibleIndices.clear();
-    const roots = model.configurationError ? [] : [...model.projects, ...(model.resources ? [model.resources] : [])];
+    const roots = model.configurationError || model.workspaceUnavailable ? [] : [...model.projects, ...(model.resources ? [model.resources] : [])];
     if (!focusedKey && roots.length) focusedKey = nodeKey(roots[0].name, roots[0].relative, roots[0].target);
     for (const root of roots) appendNode(rows, ensureNode(root), 0);
     if (!roots.length) {
-      const text = model.configurationError ? 'Workspace configuration needs attention. See the error above.' : model.workspace ? 'No folders registered. Use Add to choose workspace folders.' : 'No workspace selected.';
+      const text = model.workspaceUnavailable ? 'Workspace folder is unavailable. Open its current location above.' : model.configurationError ? 'Workspace configuration needs attention. See the error above.' : model.workspace ? 'No folders registered. Use Add to choose workspace folders.' : 'No workspace selected.';
       if (!emptyRow || emptyRow.firstChild.textContent !== text) {
         emptyRow = element('tr', 'info-row');
         const cell = element('td', 'info-cell', text);
@@ -400,12 +419,12 @@
       model = next;
       cacheSelectionScopes();
       pendingMutation = false;
-      const roots = model.configurationError ? [] : [...model.projects, ...(model.resources ? [model.resources] : [])];
+      const roots = model.configurationError || model.workspaceUnavailable ? [] : [...model.projects, ...(model.resources ? [model.resources] : [])];
       const names = new Set(roots.map(row => JSON.stringify([row.target || 'project', row.name])));
       for (const [key, node] of nodes) if (!names.has(JSON.stringify([node.row.target || 'project', node.row.name]))) nodes.delete(key);
       render();
     } else if (message.type === 'children') {
-      if (!model || model.configurationError || message.workspaceId !== model.workspaceId) return;
+      if (!model || model.configurationError || model.workspaceUnavailable || message.workspaceId !== model.workspaceId) return;
       const node = nodes.get(nodeKey(message.name, message.relative, message.target));
       if (!node || !node.loading || message.requestId !== node.requestId) return;
       node.loading = false;

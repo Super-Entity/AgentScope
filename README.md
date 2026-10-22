@@ -22,7 +22,7 @@ Install [AgentScope from the VS Code Marketplace](https://marketplace.visualstud
 Alternatively, download a `.vsix` from [GitHub Releases](https://github.com/Super-Entity/AgentScope/releases), then run **Extensions: Install from VSIX...** in VS Code. You do not need Node.js or npm to use the extension. VS Code 1.95 or later is required.
 
 ```sh
-code --install-extension agentscope-0.8.3.vsix
+code --install-extension agentscope-0.8.4.vsix
 ```
 
 ## Getting started
@@ -67,6 +67,8 @@ Project Read/Write paths are relative to the project. Shared-resource paths are 
 For native Windows profiles, path casing does not create separate permissions. Equivalent paths within one project merge their grants; project registrations or grants that overlap another project's boundary through different casing are rejected.
 
 ## Configuration files and migration
+
+The panel shows the selected workspace and configured Codex paths. After moving a workspace, reopen it at its current location, Apply to refresh absolute profile paths, and start a new Codex chat using that folder. If the old folder is missing, **Open current folder…** opens the folder you choose in a new VS Code window.
 
 | File | Purpose |
 | --- | --- |

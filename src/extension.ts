@@ -17,6 +17,7 @@ import { CodexFilesystemMode, CodexRuntime, resolveFilesystemMode, runtimeWorksp
 import { readScopeConfiguration, SCOPE_CONFIGURATION_FILE } from './configuration';
 import { chooseAndOpenScopedChat } from './chatEntry';
 import { detectWindowsSandbox } from './windowsSandbox';
+import { assertWorkspaceLocation, WorkspaceLocationError } from './workspaceLocation';
 
 type ScopeNode = { kind: 'module'; name: string };
 
@@ -31,6 +32,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let selectedWorkspaceRoot: string | undefined;
   let selectedWorkspaceFolderPath: string | undefined;
   let configurationError: string | null = null;
+  let workspaceUnavailable = false;
   let recoveryCheckpoint: PolicyCheckpoint | undefined;
   let workspaceSelectionRoots: ResourceChild[] = [];
   let watchedWorkspaceRoot: string | undefined;
@@ -90,6 +92,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     return {
       workspaceId, workspace: selectedRoot ? path.basename(selectedRoot) || selectedRoot : null,
+      workspacePath: selectedRoot, codexWorkspacePath: configuredCodexWorkspacePath(), workspaceUnavailable,
       caseSensitive: process.platform !== 'win32', trusted: vscode.workspace.isTrusted,
       busy: writing || loading || selectingPaths || startingChat, dirty: currentState?.dirty === true,
       configurationError,
@@ -128,7 +131,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   function state(): WorkspaceState {
-    if (!currentState) { throw new Error(configurationError ? `Fix the workspace configuration before editing scopes: ${configurationError}` : 'Open and select a local workspace folder first.'); }
+    if (!currentState) { throw new Error(workspaceUnavailable ? configurationError! : configurationError ? `Fix the workspace configuration before editing scopes: ${configurationError}` : 'Open and select a local workspace folder first.'); }
     return currentState;
   }
 
@@ -232,6 +235,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   async function ensureWritableWorkspace(current: WorkspaceState): Promise<void> {
     ensureWorkspace(current);
+    await assertWorkspaceLocation(selectedWorkspaceFolderPath!);
     const origin = await verifyContained(selectedWorkspaceFolderPath!, selectedWorkspaceFolderPath!);
     if (!sameConfigurationPath(origin, current.root)) throw new Error('The selected workspace folder changed through a link. Select it again before changing configuration.');
     if (current.rootIdentity) await assertDirectoryIdentity(current.root, current.rootIdentity);
@@ -241,6 +245,7 @@ export function activate(context: vscode.ExtensionContext): void {
   function clearWorkspace(): void {
     currentState = undefined; selectedWorkspaceRoot = undefined; selectedWorkspaceFolderPath = undefined;
     configurationError = null; recoveryCheckpoint = undefined; workspaceSelectionRoots = [];
+    workspaceUnavailable = false;
     selectedPreset = null; presetOptions = undefined;
     for (const watcher of watchers) watcher.dispose();
     watchers = []; watchedWorkspaceRoot = undefined; queuedReloadRoot = undefined;
@@ -281,6 +286,7 @@ export function activate(context: vscode.ExtensionContext): void {
     update();
     try {
       // Keep observing the selected folder even when its configuration needs repair.
+      await assertWorkspaceLocation(selected);
       const canonicalSelected = await verifyContained(selected, selected);
       selectedWorkspaceRoot = canonicalSelected;
       watchConfiguration(canonicalSelected);
@@ -295,6 +301,7 @@ export function activate(context: vscode.ExtensionContext): void {
       await refreshWorkspaceSelectionRoots(currentState);
       selectedWorkspaceRoot = currentState.root;
       configurationError = null;
+      workspaceUnavailable = false;
       selectedPreset = null; presetOptions = undefined;
       if (preserveMatchingPreset && previous && sameConfigurationPath(previous.root, loadedState.root) &&
         isDeepStrictEqual(previous.registry, loadedState.registry) && isDeepStrictEqual(previous.hidden, loadedState.hidden) &&
@@ -309,6 +316,7 @@ export function activate(context: vscode.ExtensionContext): void {
       currentState = undefined;
       workspaceSelectionRoots = [];
       configurationError = errorMessage(error);
+      workspaceUnavailable = error instanceof WorkspaceLocationError;
       selectedPreset = null; presetOptions = undefined;
       workspaceId++;
       throw error;
@@ -528,6 +536,14 @@ export function activate(context: vscode.ExtensionContext): void {
     return undefined;
   }
 
+  function configuredCodexWorkspacePath(): string | undefined {
+    if (!currentState) return undefined;
+    try {
+      const options = resolvedOptions();
+      return runtimeWorkspaceRoot(currentState.root, options.codexRuntime, options.codexWorkspaceRoot);
+    } catch { return undefined; }
+  }
+
   async function plan(options = resolvedOptions()): Promise<ApplyPlan> {
     const current = state();
     await ensureWritableWorkspace(current);
@@ -664,6 +680,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const root = currentState?.root ?? selectedWorkspaceRoot;
     if (!root) throw new Error('Select a workspace before restoring its configuration.');
     ensureWorkspaceOpen(root);
+    await assertWorkspaceLocation(root);
     const previous = undoBackup(root, context.workspaceState.get(`backup:${root}`));
     const result = { changes: previous, warnings: [] };
     const rootIdentity = currentState?.rootIdentity ?? await captureDirectoryIdentity(root);
@@ -676,6 +693,7 @@ export function activate(context: vscode.ExtensionContext): void {
       ensureWorkspaceOpen(root);
       assertSavedDocuments(result);
       await restoreChanges(previous, async () => {
+        await assertWorkspaceLocation(root);
         await assertDirectoryIdentity(root, rootIdentity);
         ensureWorkspaceOpen(root); assertSavedDocuments(result);
         if (!vscode.workspace.isTrusted) throw new Error('Trust the workspace before restoring its configuration.');
@@ -691,13 +709,15 @@ export function activate(context: vscode.ExtensionContext): void {
     const root = currentState?.root ?? selectedWorkspaceRoot;
     if (!root) throw new Error('Select a workspace before recovering its saved configuration.');
     ensureWorkspaceOpen(root);
+    await assertWorkspaceLocation(root);
     const saved = validateCheckpoint(context.globalState.get(checkpointKey(root)), root);
     writing = true; update();
     try {
       const result = await buildPolicyRecoveryPlan(root, saved);
       ensureWorkspaceOpen(root);
-      const validateRecovery = () => {
+      const validateRecovery = async () => {
         ensureWorkspaceOpen(root);
+        await assertWorkspaceLocation(root);
         assertSavedDocuments(result);
         if (!vscode.workspace.isTrusted) throw new Error('Trust the workspace before recovering its configuration.');
       };
@@ -739,6 +759,7 @@ export function activate(context: vscode.ExtensionContext): void {
       currentState = fresh; selectedWorkspaceRoot = fresh.root;
       await refreshWorkspaceSelectionRoots(fresh);
       configurationError = null; selectedPreset = null; presetOptions = undefined;
+      workspaceUnavailable = false;
       workspaceId++;
       watchConfiguration(fresh.root);
     } finally { finishPathSelection(); }
@@ -806,6 +827,7 @@ export function activate(context: vscode.ExtensionContext): void {
     assertPresetSaved(current.root);
     writing = true; update();
     try {
+      await ensureWritableWorkspace(current);
       const existing = await readPresetsSnapshot(current.root);
       let name: string | undefined;
       if (updateExisting) {
@@ -845,6 +867,7 @@ export function activate(context: vscode.ExtensionContext): void {
     let activate = false;
     writing = true; update();
     try {
+      await ensureWritableWorkspace(current);
       const snapshot = await readPresetsSnapshot(current.root);
       const store = snapshot.store;
       const names = Object.keys(store.presets).sort();
@@ -900,6 +923,7 @@ export function activate(context: vscode.ExtensionContext): void {
     assertPresetSaved(current.root);
     writing = true; update();
     try {
+      await ensureWritableWorkspace(current);
       const snapshot = await readPresetsSnapshot(current.root);
       const name = await vscode.window.showQuickPick(Object.keys(snapshot.store.presets).sort(), { title: 'AgentScope: Delete preset' });
       if (!name) return;
@@ -980,7 +1004,7 @@ export function activate(context: vscode.ExtensionContext): void {
       },
       guide: async entry => {
         const profile = profiles.find(item => item.profileName === entry.profileName)!;
-        void vscode.window.showInformationMessage(`AgentScope: Use workspace “${path.basename(current.root)}” in Codex and, before sending, select “${profile.description}” in Permissions. Codex's public new-chat command cannot select the workspace or profile automatically; its current remembered choice may differ.`);
+        void vscode.window.showInformationMessage(`AgentScope: Use workspace “${current.root}” (Codex path: “${profile.runtimeRoot || targetRoot}”) in Codex and, before sending, select “${profile.description}” in Permissions. Codex's public new-chat command cannot select the workspace or profile automatically; its current remembered choice may differ. After moving a folder, reopen its current location, trust the project in Codex when prompted, Apply, and start a new chat.`);
       },
     });
     } finally { startingChat = false; update(); drainDeferredChanges(); }
@@ -1005,9 +1029,29 @@ export function activate(context: vscode.ExtensionContext): void {
     if (selected) { await load(selected); }
   }
 
+  async function openWorkspaceFolder(): Promise<void> {
+    if (selectingPaths || writing || loading || startingChat) throw new Error('Wait for the current configuration operation before opening another workspace.');
+    const folders = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false,
+      title: 'AgentScope: Open the workspace at its current location', openLabel: 'Open folder' });
+    const folder = folders?.[0];
+    if (!folder) return;
+    if (folder.scheme !== 'file') throw new Error('Select a local workspace folder.');
+    await assertWorkspaceLocation(folder.fsPath);
+    // Keep the old window and any pending draft intact; the new window selects
+    // the current folder through VS Code's public workspace command.
+    await vscode.commands.executeCommand('vscode.openFolder', folder, true);
+  }
+
   async function guarded(action: () => Promise<unknown>, notify = true): Promise<void> {
     try { await action(); }
     catch (error) {
+      if (error instanceof WorkspaceLocationError && selectedWorkspaceRoot &&
+        (sameConfigurationPath(error.root, selectedWorkspaceRoot) || !!selectedWorkspaceFolderPath && sameConfigurationPath(error.root, selectedWorkspaceFolderPath)) &&
+        (!workspaceUnavailable || currentState)) {
+        currentState = undefined; workspaceSelectionRoots = []; recoveryCheckpoint = undefined;
+        selectedPreset = null; presetOptions = undefined;
+        configurationError = error.message; workspaceUnavailable = true; workspaceId++;
+      }
       if (notify) void vscode.window.showErrorMessage(`AgentScope: ${errorMessage(error)}`);
       update();
     }
@@ -1024,7 +1068,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (loading) { throw new Error('Wait for the workspace to finish loading.'); }
       if (!currentState) {
         const recoveryCommand = typeof message.command === 'string' ? message.command : undefined;
-        const recovery = recoveryCommand === 'refresh' || recoveryCommand === 'selectWorkspace' ||
+        const recovery = recoveryCommand === 'refresh' || recoveryCommand === 'selectWorkspace' || recoveryCommand === 'openWorkspaceFolder' ||
           (selectedWorkspaceRoot && recoveryCommand && ['openConfiguration', 'openCodex', 'restore', 'recover', 'reconfigure'].includes(recoveryCommand));
         if (message.type === 'command' && message.name === undefined && message.target === undefined && recoveryCommand && recovery) {
           await actions[recoveryCommand](); update(); return;
@@ -1040,7 +1084,7 @@ export function activate(context: vscode.ExtensionContext): void {
           await resourceVisibility(normalizeRelative(message.relative)); return;
         }
         if (message.target === 'resource') { throw new Error('Use a workspace resource action for this target.'); }
-        const allowed = ['refresh', 'apply', 'preview', 'addFolder', 'selectWorkspace', 'configure',
+        const allowed = ['refresh', 'apply', 'preview', 'addFolder', 'selectWorkspace', 'openWorkspaceFolder', 'configure',
           'toggleVisibility', 'toggleAccess', 'sharedPaths', 'restore', 'recover', 'reconfigure', 'openConfiguration', 'openCodex', 'removeProject', 'savePreset', 'updatePreset', 'activatePreset', 'deletePreset', 'newChat', 'toggleNewChatPresetPrompt'];
         if (typeof message.command !== 'string' || !allowed.includes(message.command)) {
           throw new Error('Unknown scope panel command.');
@@ -1154,7 +1198,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   const actions: Record<string, (...args: any[]) => Promise<unknown>> = {
-    refresh, selectWorkspace, addFolder, configure, preview: () => preview(), apply, restore, recover, reconfigure, sharedPaths,
+    refresh, selectWorkspace, openWorkspaceFolder, addFolder, configure, preview: () => preview(), apply, restore, recover, reconfigure, sharedPaths,
     savePreset: () => savePreset(), updatePreset: () => savePreset(true), activatePreset, deletePreset: removePreset, newChat, toggleNewChatPresetPrompt,
     toggleVisibility: (node?: ScopeNode) => changeProject(node, (current, name) => {
       if (current.registry.submodules[name].path === '.') throw new Error('The open workspace root cannot be hidden. Manage visibility for its child projects instead.');

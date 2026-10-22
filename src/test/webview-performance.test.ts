@@ -87,9 +87,18 @@ function browser() {
     querySelector(selector: string): Element | null { return this.querySelectorAll(selector)[0] ?? null; }
   }
   const ids = new Map<string, Element>();
-  for (const id of ['rows', 'status', 'preset', 'notice', 'sandbox-details', 'scope-notice', 'configuration-actions', 'recover-saved', 'workspace', 'collapse-all', 'permissions']) {
+  for (const id of ['rows', 'status', 'preset', 'notice', 'sandbox-details', 'scope-notice', 'configuration-actions', 'recover-saved', 'reconfigure-access', 'open-workspace-folder', 'workspace', 'workspace-path', 'codex-workspace-path', 'chat-help', 'collapse-all', 'permissions']) {
     ids.set(id, new Element(id === 'rows' ? 'tbody' : id === 'collapse-all' ? 'button' : 'div'));
   }
+  const commands = [
+    ['open-workspace-folder', 'openWorkspaceFolder'], ['reconfigure-access', 'reconfigure'], ['recover-saved', 'recover'],
+    ['workspace', 'selectWorkspace'], ['menu-reconfigure', 'reconfigure'], ['menu-recover', 'recover'],
+  ].map(([id, command]) => {
+    const button = ids.get(id) ?? new Element('button');
+    button.dataset.command = command;
+    ids.set(id, button);
+    return button;
+  });
   const body = ids.get('rows')!;
   const windowHandlers = new Map<string, Handler>();
   const posted: any[] = [];
@@ -97,7 +106,7 @@ function browser() {
     getElementById: (id: string) => ids.get(id),
     createElement: (tag: string) => new Element(tag),
     createDocumentFragment: () => new Element('#fragment'),
-    querySelectorAll: () => [],
+    querySelectorAll: (selector: string) => selector === '[data-command]' ? commands : [],
     addEventListener() {},
     hasFocus: () => activeElement !== null,
     get activeElement() { return activeElement; },
@@ -142,6 +151,68 @@ function projectRow(name: string, overrides: Record<string, unknown> = {}) {
 function fileRow(name: string, relative: string, directory = false) {
   return { name, relative, label: path.posix.basename(relative), directory, project: false, read: selection, write: selection };
 }
+
+test('The view shows full workspace paths without claiming the editor preset is selected in Codex', () => {
+  const ui = browser();
+  ui.send({ type: 'state', state: ui.state([], {
+    workspacePath: 'D:\\Nexus\\MyApps', codexWorkspacePath: '/mnt/d/Nexus/MyApps', preset: 'VSPlayer',
+  }) });
+  assert.equal(ui.ids.get('workspace-path')!.textContent, 'Workspace: D:\\Nexus\\MyApps');
+  assert.equal(ui.ids.get('codex-workspace-path')!.textContent, 'Configured Codex path: /mnt/d/Nexus/MyApps');
+  assert.equal(ui.ids.get('workspace')!.title, 'D:\\Nexus\\MyApps');
+  assert.match(ui.ids.get('chat-help')!.textContent, /select workspace “\/mnt\/d\/Nexus\/MyApps”, then select the chosen preset in Permissions/);
+  assert.doesNotMatch(ui.ids.get('chat-help')!.textContent, /VSPlayer/);
+  assert.equal(ui.ids.get('configuration-actions')!.hidden, true);
+  ui.send({ type: 'state', state: ui.state([]) });
+  assert.equal(ui.ids.get('workspace-path')!.hidden, true);
+  assert.equal(ui.ids.get('codex-workspace-path')!.hidden, true);
+  assert.equal(ui.ids.get('chat-help')!.textContent, 'Choose a preset, then select it in Codex Permissions.');
+});
+
+test('An unavailable workspace offers relocation instead of configuration repair', () => {
+  const ui = browser();
+  ui.send({ type: 'state', state: ui.state([projectRow('app')], {
+    workspaceUnavailable: true, configurationError: 'Workspace folder no longer exists: D:\\MyApps', recoveryAvailable: true,
+  }) });
+  assert.equal(ui.ids.get('configuration-actions')!.hidden, false);
+  assert.equal(ui.ids.get('open-workspace-folder')!.hidden, false);
+  assert.equal(ui.ids.get('open-workspace-folder')!.disabled, false);
+  for (const id of ['recover-saved', 'reconfigure-access', 'menu-recover', 'menu-reconfigure']) {
+    assert.equal(ui.ids.get(id)!.hidden, true);
+    assert.equal(ui.ids.get(id)!.disabled, true);
+  }
+  assert.match(ui.ids.get('notice')!.textContent, /Open its current location/);
+  assert.doesNotMatch(ui.ids.get('notice')!.textContent, /Reconfigure|Recover saved configuration/);
+  assert.match(ui.body.children[0].firstChild!.textContent, /Workspace folder is unavailable/);
+  const before = ui.posted.length;
+  ui.ids.get('open-workspace-folder')!.fire('click');
+  assert.equal(ui.posted.length, before + 1);
+  assert.equal(ui.posted.at(-1).command, 'openWorkspaceFolder');
+  ui.send({ type: 'state', state: ui.state([], { configurationError: 'Invalid configuration', recoveryAvailable: true }) });
+  assert.equal(ui.ids.get('open-workspace-folder')!.hidden, true);
+  for (const id of ['recover-saved', 'reconfigure-access', 'menu-recover', 'menu-reconfigure']) assert.equal(ui.ids.get(id)!.hidden, false);
+});
+
+test('Opening a current folder is available without a trusted workspace and respects busy and pending guards', () => {
+  const ui = browser();
+  ui.send({ type: 'state', state: ui.state([], { workspace: null, trusted: false, configurationError: 'No local workspace' }) });
+  const open = ui.ids.get('open-workspace-folder')!;
+  assert.equal(open.hidden, false);
+  assert.equal(open.disabled, false);
+  open.fire('click');
+  assert.equal(ui.posted.at(-1).command, 'openWorkspaceFolder');
+  const beforeBusy = ui.posted.length;
+  ui.send({ type: 'state', state: ui.state([], { busy: true, workspaceUnavailable: true }) });
+  assert.equal(open.disabled, true);
+  open.fire('click');
+  assert.equal(ui.posted.length, beforeBusy);
+  ui.send({ type: 'state', state: ui.state([projectRow('app')]) });
+  ui.control(ui.row('app'), 'access', 'read').fire('change');
+  const beforePending = ui.posted.length;
+  assert.equal(open.disabled, true);
+  open.fire('click');
+  assert.equal(ui.posted.length, beforePending);
+});
 
 test('Sandbox information stays in collapsed details and disappears after a runtime change', () => {
   const ui = browser();

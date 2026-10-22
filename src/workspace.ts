@@ -12,6 +12,7 @@ import { detectWindowsSandbox, WindowsSandboxDetection } from './windowsSandbox'
 import { updateWindowsSandbox } from './core/windowsConfig';
 import { ApplyPlan, DiscoveredModule, FileChange, ModuleConfig, Registry, WorkspaceState } from './types';
 import { isResourcePath } from './resources';
+import { assertWorkspaceLocation } from './workspaceLocation';
 
 export interface ApplyOptions {
   generateCodexProfile: boolean;
@@ -161,6 +162,7 @@ async function discoverOrdinaryProjects(root: string, warnings: string[]): Promi
 
 /** Read configuration and, only without saved registration, enumerate immediate ordinary folders. */
 export async function loadWorkspace(root: string): Promise<WorkspaceState> {
+  await assertWorkspaceLocation(root);
   const canonicalRoot = await fs.realpath(path.resolve(root));
   const rootIdentity = await captureDirectoryIdentity(canonicalRoot);
   const [agents, access, gitmodules, settings, configuration] = await readWorkspaceConfiguration(canonicalRoot);
@@ -219,6 +221,7 @@ export async function loadWorkspace(root: string): Promise<WorkspaceState> {
  * registration metadata only identifies project roots. No previous grant is reused.
  */
 export async function loadWorkspaceForReconfiguration(root: string, registrationRegistry?: Registry): Promise<WorkspaceState> {
+  await assertWorkspaceLocation(root);
   const canonicalRoot = await fs.realpath(path.resolve(root));
   const rootIdentity = await captureDirectoryIdentity(canonicalRoot);
   const [agents, access, gitmodules, settings, configuration] = await readWorkspaceConfiguration(canonicalRoot);
@@ -467,6 +470,7 @@ async function expectedConfiguration(state: WorkspaceState, relative: string, re
 /** Compute all output text first. Any invalid registry/profile aborts without writing files. */
 export async function buildApplyPlan(state: WorkspaceState, options: ApplyOptions,
   dependencies: { detectWindowsSandbox?: typeof detectWindowsSandbox; presetDefaults?: ApplyOptions } = {}): Promise<ApplyPlan> {
+  await assertWorkspaceLocation(state.root);
   const rootIdentity = state.rootIdentity ??= await captureDirectoryIdentity(state.root);
   await assertDirectoryIdentity(state.root, rootIdentity);
   if (comparable(await fs.realpath(state.root)) !== comparable(state.root)) throw new Error('Workspace root changed since it was loaded; refresh before applying.');
